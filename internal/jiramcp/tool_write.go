@@ -58,6 +58,10 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 		return textResult("items array is empty. Provide at least one item.", true), nil, nil
 	}
 
+	if args.Action == "move_to_sprint" {
+		return h.handleMoveToSprint(ctx, args), nil, nil
+	}
+
 	var results []string
 
 	for i, item := range args.Items {
@@ -78,10 +82,8 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 			msg, err = h.writeComment(ctx, item, args.DryRun)
 		case "edit_comment":
 			msg, err = h.writeEditComment(ctx, item, args.DryRun)
-		case "move_to_sprint":
-			msg, err = h.writeMoveToSprint(ctx, item, args.DryRun)
 		default:
-			msg = fmt.Sprintf("Unknown action %q", args.Action)
+			return textResult(fmt.Sprintf("Unknown action %q. Valid: create, update, delete, transition, comment, edit_comment, move_to_sprint.", args.Action), true), nil, nil
 		}
 
 		if err != nil {
@@ -99,6 +101,57 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 	out := fmt.Sprintf("%s (%d item(s), action=%s):\n\n%s", label, len(args.Items), args.Action, strings.Join(results, "\n\n"))
 
 	return textResult(out, false), nil, nil
+}
+
+// handleMoveToSprint groups items by sprint_id and calls MoveIssuesToSprint once per sprint.
+func (h *handlers) handleMoveToSprint(ctx context.Context, args WriteArgs) *mcp.CallToolResult {
+	// Validate all items first.
+	for i, item := range args.Items {
+		if item.Key == "" || item.SprintID == 0 {
+			return textResult(fmt.Sprintf("[%d] move_to_sprint requires key and sprint_id. Hint: Use jira_read resource=sprints board_id=<id> to find sprint IDs", i+1), true)
+		}
+	}
+
+	// Group keys by sprint_id, preserving insertion order.
+	type sprintGroup struct {
+		sprintID int
+		keys     []string
+		indices  []int
+	}
+	order := []int{}
+	groups := map[int]*sprintGroup{}
+	for i, item := range args.Items {
+		if _, ok := groups[item.SprintID]; !ok {
+			groups[item.SprintID] = &sprintGroup{sprintID: item.SprintID}
+			order = append(order, item.SprintID)
+		}
+		g := groups[item.SprintID]
+		g.keys = append(g.keys, item.Key)
+		g.indices = append(g.indices, i+1)
+	}
+
+	label := "Results"
+	if args.DryRun {
+		label = "DRY RUN — no changes made"
+	}
+
+	var results []string
+	for _, sprintID := range order {
+		g := groups[sprintID]
+		prefix := fmt.Sprintf("%v", g.indices)
+		if args.DryRun {
+			results = append(results, fmt.Sprintf("%s Would move %v to sprint %d.", prefix, g.keys, sprintID))
+			continue
+		}
+		if err := h.client.MoveIssuesToSprint(ctx, sprintID, g.keys); err != nil {
+			results = append(results, fmt.Sprintf("%s ERROR: failed to move %v to sprint %d: %v", prefix, g.keys, sprintID, err))
+		} else {
+			results = append(results, fmt.Sprintf("%s Moved %v to sprint %d.", prefix, g.keys, sprintID))
+		}
+	}
+
+	out := fmt.Sprintf("%s (%d item(s), action=move_to_sprint):\n\n%s", label, len(args.Items), strings.Join(results, "\n\n"))
+	return textResult(out, false)
 }
 
 // buildIssuePayload constructs a v3 API payload with ADF description.
@@ -290,18 +343,4 @@ func (h *handlers) writeEditComment(ctx context.Context, item WriteItem, dryRun 
 	return fmt.Sprintf("Updated comment %s on %s.", item.CommentID, item.Key), nil
 }
 
-func (h *handlers) writeMoveToSprint(ctx context.Context, item WriteItem, dryRun bool) (string, error) {
-	if item.Key == "" || item.SprintID == 0 {
-		return "", fmt.Errorf("move_to_sprint requires key and sprint_id. Hint: Use jira_read resource=sprints board_id=<id> to find sprint IDs")
-	}
 
-	if dryRun {
-		return fmt.Sprintf("Would move %s to sprint %d.", item.Key, item.SprintID), nil
-	}
-
-	if err := h.client.MoveIssuesToSprint(ctx, item.SprintID, []string{item.Key}); err != nil {
-		return "", fmt.Errorf("failed to move %s to sprint %d: %w", item.Key, item.SprintID, err)
-	}
-
-	return fmt.Sprintf("Moved %s to sprint %d.", item.Key, item.SprintID), nil
-}

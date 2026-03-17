@@ -132,7 +132,7 @@ func TestHandleWrite_UnknownAction(t *testing.T) {
 		Action: "bogus",
 		Items:  []WriteItem{{Key: "X-1"}},
 	})
-	assert.False(t, isErr)
+	assert.True(t, isErr)
 	assert.Contains(t, text, `Unknown action "bogus"`)
 }
 
@@ -568,7 +568,53 @@ func TestWriteMoveToSprint_Success(t *testing.T) {
 		Action: "move_to_sprint",
 		Items:  []WriteItem{{Key: "PROJ-1", SprintID: 42}},
 	})
-	assert.Contains(t, text, "Moved PROJ-1 to sprint 42")
+	assert.Contains(t, text, "Moved")
+	assert.Contains(t, text, "PROJ-1")
+	assert.Contains(t, text, "sprint 42")
+}
+
+func TestWriteMoveToSprint_BatchSameSprint(t *testing.T) {
+	var capturedKeys []string
+	mc := &mockClient{
+		MoveIssuesToSprintFn: func(_ context.Context, sid int, keys []string) error {
+			assert.Equal(t, 42, sid)
+			capturedKeys = keys
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "move_to_sprint",
+		Items: []WriteItem{
+			{Key: "PROJ-1", SprintID: 42},
+			{Key: "PROJ-2", SprintID: 42},
+		},
+	})
+	// Should make exactly one API call with both keys.
+	assert.Equal(t, []string{"PROJ-1", "PROJ-2"}, capturedKeys)
+	assert.Contains(t, text, "PROJ-1")
+	assert.Contains(t, text, "PROJ-2")
+}
+
+func TestWriteMoveToSprint_BatchDifferentSprints(t *testing.T) {
+	calls := map[int][]string{}
+	mc := &mockClient{
+		MoveIssuesToSprintFn: func(_ context.Context, sid int, keys []string) error {
+			calls[sid] = keys
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	callWrite(t, h, WriteArgs{
+		Action: "move_to_sprint",
+		Items: []WriteItem{
+			{Key: "PROJ-1", SprintID: 10},
+			{Key: "PROJ-2", SprintID: 20},
+			{Key: "PROJ-3", SprintID: 10},
+		},
+	})
+	assert.Equal(t, []string{"PROJ-1", "PROJ-3"}, calls[10])
+	assert.Equal(t, []string{"PROJ-2"}, calls[20])
 }
 
 func TestWriteMoveToSprint_MissingFields(t *testing.T) {
@@ -582,10 +628,11 @@ func TestWriteMoveToSprint_MissingFields(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newWriteHandlers(&mockClient{})
-			text, _ := callWrite(t, h, WriteArgs{
+			text, isErr := callWrite(t, h, WriteArgs{
 				Action: "move_to_sprint",
 				Items:  []WriteItem{tc.item},
 			})
+			assert.True(t, isErr)
 			assert.Contains(t, text, "move_to_sprint requires key and sprint_id")
 		})
 	}
@@ -599,7 +646,9 @@ func TestWriteMoveToSprint_DryRun(t *testing.T) {
 		Items:  []WriteItem{{Key: "PROJ-1", SprintID: 42}},
 	})
 	assert.Contains(t, text, "DRY RUN")
-	assert.Contains(t, text, "Would move PROJ-1 to sprint 42")
+	assert.Contains(t, text, "Would move")
+	assert.Contains(t, text, "PROJ-1")
+	assert.Contains(t, text, "sprint 42")
 }
 
 // --- batch ---
@@ -695,10 +744,11 @@ func TestWriteMoveToSprint_ClientError(t *testing.T) {
 		},
 	}
 	h := newWriteHandlers(mc)
-	text, _ := callWrite(t, h, WriteArgs{
+	text, isErr := callWrite(t, h, WriteArgs{
 		Action: "move_to_sprint",
 		Items:  []WriteItem{{Key: "PROJ-1", SprintID: 99}},
 	})
+	assert.False(t, isErr) // errors are per-sprint in the result text
 	assert.Contains(t, text, "ERROR")
 	assert.Contains(t, text, "sprint not found")
 }
