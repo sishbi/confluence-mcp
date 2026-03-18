@@ -9,7 +9,7 @@ Most JIRA MCPs expose too many tools. Every time the model picks one, it spends 
 | Tool | What it does |
 |---|---|
 | `jira_read` | Fetch issues by key, search by JQL, list projects/boards/sprints |
-| `jira_write` | Create, update, delete, transition, comment — with `dry_run` support |
+| `jira_write` | Create, update, delete, transition, comment — accepts Markdown, converts to Atlassian format; supports `dry_run` to preview changes before committing |
 | `jira_schema` | Discover fields, transitions, and allowed values |
 
 Less tool surface area means more of the context window goes to your actual work. The model makes fewer wrong choices, calls fewer redundant tools, and gets to the answer faster. The three tools compose naturally: schema to discover, read to find, write to change.
