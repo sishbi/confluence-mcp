@@ -1,15 +1,15 @@
 version: 2
 
-project_name: jira-mcp
+project_name: confluence-mcp
 
 before:
   hooks:
     - go mod tidy
 
 builds:
-  - id: jira-mcp
-    binary: jira-mcp
-    main: ./cmd/jira-mcp
+  - id: confluence-mcp
+    binary: confluence-mcp
+    main: ./cmd/confluence-mcp
     env:
       - CGO_ENABLED=0
     goos:
@@ -26,9 +26,9 @@ builds:
       - -X main.date={{.Date}}
 
 archives:
-  - id: jira-mcp
+  - id: confluence-mcp
     ids:
-      - jira-mcp
+      - confluence-mcp
     formats:
       - tar.gz
     format_overrides:
@@ -44,38 +44,38 @@ checksum:
 changelog:
   use: github
 
-# Homebrew cask published to Formula/ directory in this repo.
-# Install: brew tap mmatczuk/jira-mcp https://github.com/mmatczuk/jira-mcp
-#          brew install jira-mcp
+# Homebrew cask published to Casks/ directory in this repo.
+# Install: brew tap sishbi/confluence-mcp https://github.com/sishbi/confluence-mcp
+#          brew install confluence-mcp
 homebrew_casks:
-  - name: jira-mcp
+  - name: confluence-mcp
     ids:
-      - jira-mcp
+      - confluence-mcp
     binaries:
-      - jira-mcp
+      - confluence-mcp
     directory: Casks
     repository:
-      owner: mmatczuk
-      name: jira-mcp
+      owner: sishbi
+      name: confluence-mcp
       token: "{{ .Env.GITHUB_TOKEN }}"
-    homepage: https://github.com/mmatczuk/jira-mcp
-    description: JIRA MCP server — give your AI assistant full JIRA access
+    homepage: https://github.com/sishbi/confluence-mcp
+    description: Confluence MCP server — give your AI assistant full Confluence access
     license: MIT
     hooks:
       post:
         install: |
           if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/jira-mcp"]
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/confluence-mcp"]
           end
 
 # Multi-arch Docker image pushed to Docker Hub as :latest only.
 dockers_v2:
-  - id: jira-mcp
+  - id: confluence-mcp
     ids:
-      - jira-mcp
+      - confluence-mcp
     dockerfile: Dockerfile
     images:
-      - mmatczuk/jira-mcp
+      - sishbi/confluence-mcp
     tags:
       - latest
     platforms:

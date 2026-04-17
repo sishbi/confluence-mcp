@@ -11,6 +11,7 @@ tasks:
     desc: Run linter
     cmds:
       - golangci-lint run ./...
+      - go vet -tags smoke ./...
 
   test:
     desc: Run tests
@@ -20,4 +21,4 @@ tasks:
   build:
     desc: Build the MCP server binary
     cmds:
-      - go build -o bin/jira-mcp ./cmd/jira-mcp
+      - go build -o bin/confluence-mcp ./cmd/confluence-mcp
