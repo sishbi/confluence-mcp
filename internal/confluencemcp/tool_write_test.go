@@ -530,6 +530,167 @@ func TestAppend_NoRetryWhenVersionPinned(t *testing.T) {
 	assert.Equal(t, 1, updateCalls, "pinned version must not retry on 409")
 }
 
+func TestWriteDelete_ErrorPaths(t *testing.T) {
+	t.Run("page_id required", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeDelete(context.Background(), WriteItem{}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "page_id")
+	})
+	t.Run("dry_run skips API call", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		msg, err := h.writeDelete(context.Background(), WriteItem{PageID: "p1"}, true)
+		require.NoError(t, err)
+		assert.Contains(t, msg, "Would delete")
+	})
+	t.Run("client error surfaced", func(t *testing.T) {
+		h := &handlers{client: &mockClient{
+			DeletePageFn: func(_ context.Context, _ string) error { return assert.AnError },
+		}}
+		_, err := h.writeDelete(context.Background(), WriteItem{PageID: "p1"}, false)
+		require.Error(t, err)
+	})
+}
+
+func TestWriteComment_ErrorPaths(t *testing.T) {
+	t.Run("page_id required", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeComment(context.Background(), WriteItem{Body: "hi"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "page_id")
+	})
+	t.Run("body required", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeComment(context.Background(), WriteItem{PageID: "p1"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "body")
+	})
+	t.Run("dry_run skips API call", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		msg, err := h.writeComment(context.Background(), WriteItem{PageID: "p1", Body: "hi"}, true)
+		require.NoError(t, err)
+		assert.Contains(t, msg, "Would add comment")
+	})
+	t.Run("client error surfaced", func(t *testing.T) {
+		h := &handlers{client: &mockClient{
+			AddCommentFn: func(_ context.Context, _ string, _ string) (*confluence.Comment, error) {
+				return nil, assert.AnError
+			},
+		}}
+		_, err := h.writeComment(context.Background(), WriteItem{PageID: "p1", Body: "hi"}, false)
+		require.Error(t, err)
+	})
+}
+
+func TestWriteEditComment_ErrorPaths(t *testing.T) {
+	t.Run("comment_id required", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeEditComment(context.Background(), WriteItem{Body: "x", VersionNumber: 1}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "comment_id")
+	})
+	t.Run("version_number required", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeEditComment(context.Background(), WriteItem{CommentID: "c1", Body: "x"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "version_number")
+	})
+	t.Run("dry_run skips API call", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		msg, err := h.writeEditComment(context.Background(), WriteItem{CommentID: "c1", Body: "x", VersionNumber: 2}, true)
+		require.NoError(t, err)
+		assert.Contains(t, msg, "Would update comment")
+		assert.Contains(t, msg, "version 3")
+	})
+	t.Run("client error surfaced", func(t *testing.T) {
+		h := &handlers{client: &mockClient{
+			UpdateCommentFn: func(_ context.Context, _ string, _ string, _ int) (*confluence.Comment, error) {
+				return nil, assert.AnError
+			},
+		}}
+		_, err := h.writeEditComment(context.Background(), WriteItem{CommentID: "c1", Body: "x", VersionNumber: 2}, false)
+		require.Error(t, err)
+	})
+}
+
+func TestWriteAddLabel_ErrorPaths(t *testing.T) {
+	t.Run("page_id required", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeAddLabel(context.Background(), WriteItem{Label: "x"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "page_id")
+	})
+	t.Run("label required", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeAddLabel(context.Background(), WriteItem{PageID: "p1"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "label")
+	})
+	t.Run("dry_run skips API call", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		msg, err := h.writeAddLabel(context.Background(), WriteItem{PageID: "p1", Label: "x"}, true)
+		require.NoError(t, err)
+		assert.Contains(t, msg, "Would add label")
+	})
+	t.Run("client error surfaced", func(t *testing.T) {
+		h := &handlers{client: &mockClient{
+			AddPageLabelFn: func(_ context.Context, _ string, _ string) (*confluence.Label, error) {
+				return nil, assert.AnError
+			},
+		}}
+		_, err := h.writeAddLabel(context.Background(), WriteItem{PageID: "p1", Label: "x"}, false)
+		require.Error(t, err)
+	})
+}
+
+func TestWriteRemoveLabel_ErrorPaths(t *testing.T) {
+	t.Run("page_id required", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeRemoveLabel(context.Background(), WriteItem{Label: "x"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "page_id")
+	})
+	t.Run("label required", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeRemoveLabel(context.Background(), WriteItem{PageID: "p1"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "label")
+	})
+	t.Run("dry_run skips API call", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		msg, err := h.writeRemoveLabel(context.Background(), WriteItem{PageID: "p1", Label: "x"}, true)
+		require.NoError(t, err)
+		assert.Contains(t, msg, "Would remove label")
+	})
+	t.Run("client error surfaced", func(t *testing.T) {
+		h := &handlers{client: &mockClient{
+			RemovePageLabelFn: func(_ context.Context, _ string, _ string) error { return assert.AnError },
+		}}
+		_, err := h.writeRemoveLabel(context.Background(), WriteItem{PageID: "p1", Label: "x"}, false)
+		require.Error(t, err)
+	})
+}
+
+func TestWriteCreate_ClientError(t *testing.T) {
+	h := &handlers{client: &mockClient{
+		CreatePageFn: func(_ context.Context, _ map[string]any) (*confluence.Page, error) {
+			return nil, assert.AnError
+		},
+	}}
+	_, err := h.writeCreate(context.Background(), WriteItem{SpaceID: "s1", Title: "T"}, false)
+	require.Error(t, err)
+}
+
+func TestWriteUpdate_ClientError(t *testing.T) {
+	h := &handlers{client: &mockClient{
+		UpdatePageFn: func(_ context.Context, _ string, _ map[string]any) (*confluence.Page, error) {
+			return nil, assert.AnError
+		},
+	}}
+	_, err := h.writeUpdate(context.Background(), WriteItem{PageID: "p1", Title: "T", VersionNumber: 1}, false)
+	require.Error(t, err)
+}
+
 func TestWriteTool_DescriptionMentionsAppend(t *testing.T) {
 	desc := writeTool.Description
 	assert.Contains(t, desc, "append:")
