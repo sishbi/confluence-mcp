@@ -6,7 +6,9 @@
 # Logs are appended (not truncated) so you can tail -f during a session.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BINARY="$SCRIPT_DIR/../bin/confluence-mcp"
+# Prefer an explicit binary path (set by install-mcp.sh --brew), fall back to
+# the locally built binary from `task build`.
+BINARY="${CONFLUENCE_MCP_BINARY:-$SCRIPT_DIR/../bin/confluence-mcp}"
 LOG_FILE="${CONFLUENCE_MCP_LOG_FILE:-/tmp/confluence-mcp.log}"
 LOG_LEVEL="${CONFLUENCE_MCP_LOG_LEVEL:-info}"
 

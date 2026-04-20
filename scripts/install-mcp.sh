@@ -6,10 +6,15 @@ set -euo pipefail
 # Usage:
 #   ./scripts/install-mcp.sh                     # install native (builds first, info logs)
 #   ./scripts/install-mcp.sh --debug             # install native with debug logging
+#   ./scripts/install-mcp.sh --brew              # install Homebrew binary (no build)
+#   ./scripts/install-mcp.sh --brew --debug      # Homebrew binary with debug logging
 #   ./scripts/install-mcp.sh --docker            # install Docker variant (no build)
 #   ./scripts/install-mcp.sh --docker --debug    # Docker variant with debug logging
-#   ./scripts/install-mcp.sh --remove            # uninstall native
+#   ./scripts/install-mcp.sh --remove            # uninstall native/brew (same server name)
 #   ./scripts/install-mcp.sh --docker --remove   # uninstall Docker variant
+#
+# Scope flags (combine with any install mode):
+#   --user        register user-wide (all projects; default is local/project-scoped)
 #
 # Required env vars (set in your shell profile or .envrc):
 #   CONFLUENCE_URL        e.g. https://your-instance.atlassian.net
@@ -31,16 +36,21 @@ DOCKER_RUN="$SCRIPT_DIR/docker-run.sh"
 MODE="native"
 ACTION="install"
 LOG_LEVEL="info"
+SCOPE="local"
 
 for arg in "$@"; do
     case "$arg" in
         --docker) MODE="docker" ;;
+        --brew)   MODE="brew" ;;
         --debug)  LOG_LEVEL="debug" ;;
         --remove) ACTION="remove" ;;
+        --user)   SCOPE="user" ;;
         *) echo "ERROR: unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
 
+# Native and brew share the server name (confluence-mcp) — switching modes
+# re-registers cleanly because the install step removes any prior entry first.
 if [[ "$MODE" == "docker" ]]; then
     SERVER_NAME="confluence-mcp-docker"
     LAUNCHER="$DOCKER_RUN"
@@ -50,8 +60,8 @@ else
 fi
 
 if [[ "$ACTION" == "remove" ]]; then
-    echo "Removing $SERVER_NAME from Claude Code..."
-    claude mcp remove "$SERVER_NAME"
+    echo "Removing $SERVER_NAME from Claude Code (scope: $SCOPE)..."
+    claude mcp remove --scope "$SCOPE" "$SERVER_NAME"
     echo "Done."
     exit 0
 fi
@@ -65,18 +75,26 @@ for var in CONFLUENCE_URL CONFLUENCE_EMAIL CONFLUENCE_API_TOKEN; do
     fi
 done
 
-# Native mode builds the binary; Docker mode relies on a pulled/built image.
+# Native mode builds the binary; Docker mode relies on a pulled/built image;
+# brew mode resolves the installed binary on PATH.
+BREW_BINARY=""
 if [[ "$MODE" == "native" ]]; then
     echo "Building $BINARY..."
     (cd "$PROJECT_DIR" && task build)
+elif [[ "$MODE" == "brew" ]]; then
+    if ! BREW_BINARY="$(command -v confluence-mcp 2>/dev/null)"; then
+        echo "ERROR: confluence-mcp not found on PATH — run 'brew install --cask confluence-mcp' first" >&2
+        exit 1
+    fi
+    echo "Using Homebrew binary: $BREW_BINARY"
 fi
 
-# Remove existing registration (ignore error if not present).
-claude mcp remove "$SERVER_NAME" 2>/dev/null || true
+# Remove existing registration at the target scope (ignore error if not present).
+claude mcp remove --scope "$SCOPE" "$SERVER_NAME" 2>/dev/null || true
 
 LOG_FILE="${CONFLUENCE_MCP_LOG_FILE:-/tmp/confluence-mcp.log}"
 touch "$LOG_FILE"
-echo "Registering $SERVER_NAME in Claude Code (mode: $MODE, log level: $LOG_LEVEL, logs: $LOG_FILE)..."
+echo "Registering $SERVER_NAME in Claude Code (mode: $MODE, scope: $SCOPE, log level: $LOG_LEVEL, logs: $LOG_FILE)..."
 
 typeset -a env_args
 env_args=(
@@ -89,7 +107,10 @@ env_args=(
 if [[ -n "${CONFLUENCE_MCP_IMAGE:-}" ]]; then
     env_args+=(-e "CONFLUENCE_MCP_IMAGE=$CONFLUENCE_MCP_IMAGE")
 fi
+if [[ -n "$BREW_BINARY" ]]; then
+    env_args+=(-e "CONFLUENCE_MCP_BINARY=$BREW_BINARY")
+fi
 
-claude mcp add "${env_args[@]}" -- "$SERVER_NAME" "$LAUNCHER"
+claude mcp add --scope "$SCOPE" "${env_args[@]}" -- "$SERVER_NAME" "$LAUNCHER"
 
 echo "Installed. Tail logs with: tail -f $LOG_FILE"
