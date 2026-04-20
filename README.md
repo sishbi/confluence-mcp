@@ -120,39 +120,7 @@ Requires the three `CONFLUENCE_*` env vars. The suite reads a known page, round-
 
 ## Releasing
 
-Releases are automated via [release-please](https://github.com/googleapis/release-please). The version, changelog, and tag are all driven from PR titles — contributors do not tag manually.
-
-### PR title convention
-
-Every PR title must follow [Conventional Commits](https://www.conventionalcommits.org/) and is enforced by the `Validate PR title` check:
-
-```
-<type>(optional-scope): <subject>
-```
-
-Allowed types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `style`, `revert`. Append `!` (e.g. `feat!:`) or add a `BREAKING CHANGE:` footer for a breaking change.
-
-### How a release is cut
-
-1. Merge PRs to `main` as usual. Each squash-merge commit keeps its Conventional Commits title.
-2. On every push to `main`, the `Release Please` workflow updates (or opens) a standing Release PR titled `chore(main): release X.Y.Z`. It accumulates a changelog entry per merged PR and bumps the version.
-3. When the release is ready, merge the Release PR. release-please creates the `vX.Y.Z` tag.
-4. The tag push triggers the `Release` workflow (GoReleaser), which publishes the GitHub release binaries, pushes the Docker image, and updates the Homebrew cask.
-
-### Version bump rules (pre-1.0)
-
-While under `1.0.0`, the bump is one level smaller than standard semver:
-
-| Commit type              | Bump  |
-|--------------------------|-------|
-| `fix:` / `feat:`         | patch |
-| `feat!:` / breaking      | minor |
-
-No accidental 1.0 cut. Remove `bump-minor-pre-major` / `bump-patch-for-minor-pre-major` from `release-please-config.json` when you are ready for 1.0.
-
-### Forcing a specific version
-
-If a PR contains only non-bumping types (e.g. `docs:`, `chore:`) but you still want to cut a release when it merges, append a `Release-As: X.Y.Z` trailer to the squash-merge commit message. release-please will cut that version regardless of commit types.
+See [RELEASING.md](RELEASING.md).
 
 ## License
 
