@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.5](https://github.com/sishbi/confluence-mcp/compare/v0.0.4...v0.0.5) (2026-04-20)
+
+
+### Bug Fixes
+
+* give GoReleaser a branch name so cask PR mode works on same-repo ([#9](https://github.com/sishbi/confluence-mcp/issues/9)) ([a24ef6c](https://github.com/sishbi/confluence-mcp/commit/a24ef6ce20711c0c4acc7c3787e8cb92dc7e5ebf))
+
 ## [0.0.4](https://github.com/sishbi/confluence-mcp/compare/v0.0.3...v0.0.4) (2026-04-20)
 
 
