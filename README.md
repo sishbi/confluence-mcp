@@ -29,9 +29,10 @@ Give your AI agent full Confluence access with just 2 tools.
 ### Writing
 - **Markdown in, storage format out** — body fields auto-convert to Confluence XHTML
 - **Raw storage passthrough** — set `format="storage"` on an item to push XHTML directly (for macro authoring)
+- **Partial-page `append` action** — insert at end, insert after a named heading, or replace a heading's section. The agent sends only the fragment; the server fetches the current body, splices, and writes the merged result. Typical edits ship a payload ~100× smaller than `update` (observed ~147 B vs ~34 KB on a representative fixture), cutting both wall-clock and token cost. Success responses report fragment size and base→merged body bytes so the saving is visible in telemetry. Retries once on 409 from read-replica lag when no version is pinned.
 - **Batch-first** — every action takes an array; per-item errors are reported with `[N]` prefixes
 - **Dry run** — preview any write as JSON without calling the API
-- **Cache eviction** — updates and deletes automatically invalidate the page cache
+- **Cache eviction** — updates, appends, and deletes automatically invalidate the page cache
 
 ### Markdown converter
 

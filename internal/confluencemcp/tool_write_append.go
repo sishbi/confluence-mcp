@@ -71,7 +71,7 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 	updated, err := h.client.UpdatePage(ctx, item.PageID, appendPayload(item.PageID, page, res.Merged))
 	if err == nil {
 		h.cache.evict(item.PageID)
-		return fmt.Sprintf("Appended to page %q (ID: %s)", updated.Title, updated.ID), nil
+		return appendSuccessMsg(updated.Title, updated.ID, page.Body.Storage.Value, res.Merged, fragmentStorage), nil
 	}
 
 	// Retry once on 409 when the caller did not pin a version. Confluence's
@@ -89,9 +89,21 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 			return "", uerr
 		}
 		h.cache.evict(item.PageID)
-		return fmt.Sprintf("Appended to page %q (ID: %s)", updated2.Title, updated2.ID), nil
+		return appendSuccessMsg(updated2.Title, updated2.ID, page2.Body.Storage.Value, res2.Merged, fragmentStorage), nil
 	}
 	return "", err
+}
+
+// appendSuccessMsg formats the append success line, including the fragment
+// size and base→merged body sizes so the caller can see what was sent versus
+// what the server assembled.
+func appendSuccessMsg(title, id, baseBody, mergedBody, fragment string) string {
+	base := len(baseBody)
+	merged := len(mergedBody)
+	return fmt.Sprintf(
+		"Appended to page %q (ID: %s). Fragment sent: %d bytes; page body: %d → %d (Δ%+d).",
+		title, id, len(fragment), base, merged, merged-base,
+	)
 }
 
 // fetchAndSplice fetches the page's current storage body and applies the
