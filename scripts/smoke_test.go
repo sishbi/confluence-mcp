@@ -441,49 +441,7 @@ func TestSmoke_EditPageRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	marker := "\n\n---\n\n*Smoke test marker — safe to delete.*"
 
-	// Step 0: Snapshot the original page via raw client (storage format)
-	// so we can restore it exactly after the test, avoiding round-trip corruption.
-	originalPage, err := env.client.GetPage(ctx, pageID)
-	require.NoError(t, err, "fetching original page for backup")
-	originalStorage := originalPage.Body.Storage.Value
-	originalTitle := originalPage.Title
-	originalVersion := originalPage.Version.Number
-	t.Logf("Backup: version=%d, title=%q, storage=%d bytes", originalVersion, originalTitle, len(originalStorage))
-
-	// Ensure we restore the page even if the test fails.
-	// Retry on 409 Conflict — Confluence can lag on version updates.
-	t.Cleanup(func() {
-		for attempt := 0; attempt < 3; attempt++ {
-			if attempt > 0 {
-				time.Sleep(time.Duration(attempt) * time.Second)
-			}
-			current, err := env.client.GetPage(ctx, pageID)
-			if err != nil {
-				t.Logf("WARNING: restore attempt %d — could not fetch page: %v", attempt+1, err)
-				continue
-			}
-			_, err = env.client.UpdatePage(ctx, pageID, map[string]any{
-				"id":     pageID,
-				"status": "current",
-				"title":  originalTitle,
-				"version": map[string]any{
-					"number": current.Version.Number + 1,
-				},
-				"body": map[string]any{
-					"storage": map[string]any{
-						"value":          originalStorage,
-						"representation": "storage",
-					},
-				},
-			})
-			if err == nil {
-				t.Logf("Restored page to original storage format (version %d)", current.Version.Number+1)
-				return
-			}
-			t.Logf("WARNING: restore attempt %d failed: %v", attempt+1, err)
-		}
-		t.Logf("ERROR: could not restore page after 3 attempts")
-	})
+	original := snapshotAndRestorePage(t, env, pageID)
 
 	// Step 1: Read via MCP to get current version and Markdown content
 	result, err := cs.CallTool(ctx, &mcp.CallToolParams{
@@ -495,7 +453,7 @@ func TestSmoke_EditPageRoundTrip(t *testing.T) {
 	readText := result.Content[0].(*mcp.TextContent).Text
 	readVersion := extractVersion(readText)
 	readBody := extractPageBody(readText)
-	require.Equal(t, originalVersion, readVersion)
+	require.Equal(t, original.Version.Number, readVersion)
 	t.Logf("Read version: %d, body length: %d", readVersion, len(readBody))
 
 	// Step 2: Update via MCP — append a marker
@@ -506,7 +464,7 @@ func TestSmoke_EditPageRoundTrip(t *testing.T) {
 			"action": "update",
 			"items": []any{map[string]any{
 				"page_id":        pageID,
-				"title":          originalTitle,
+				"title":          original.Title,
 				"body":           modifiedBody,
 				"version_number": readVersion,
 			}},
@@ -538,7 +496,7 @@ func TestSmoke_EditPageRoundTrip(t *testing.T) {
 			"action": "update",
 			"items": []any{map[string]any{
 				"page_id":        pageID,
-				"title":          originalTitle,
+				"title":          original.Title,
 				"body":           updatedBody,
 				"version_number": updatedVersion,
 			}},
@@ -624,37 +582,7 @@ func TestSmoke_WriteStorageFormat_RoundTrip(t *testing.T) {
 	cs := env.session
 	ctx := context.Background()
 
-	// 1. Backup via raw API.
-	originalPage, err := env.client.GetPage(ctx, pageID)
-	require.NoError(t, err)
-	originalStorage := originalPage.Body.Storage.Value
-	originalVersion := originalPage.Version.Number
-
-	t.Cleanup(func() {
-		for attempt := 0; attempt < 3; attempt++ {
-			if attempt > 0 {
-				time.Sleep(time.Duration(attempt) * time.Second)
-			}
-			page, err := env.client.GetPage(ctx, pageID)
-			if err != nil {
-				t.Logf("restore: GetPage failed: %v", err)
-				continue
-			}
-			_, err = env.client.UpdatePage(ctx, pageID, map[string]any{
-				"id": pageID, "status": "current", "title": originalPage.Title,
-				"version": map[string]any{"number": page.Version.Number + 1},
-				"body": map[string]any{"storage": map[string]any{
-					"value": originalStorage, "representation": "storage",
-				}},
-			})
-			if err == nil {
-				t.Log("restore: page restored successfully")
-				return
-			}
-			t.Logf("restore attempt %d failed: %v", attempt+1, err)
-		}
-		t.Error("failed to restore page after 3 attempts")
-	})
+	original := snapshotAndRestorePage(t, env, pageID)
 
 	// 2. Read in storage format via MCP.
 	result, err := cs.CallTool(ctx, &mcp.CallToolParams{
@@ -670,7 +598,7 @@ func TestSmoke_WriteStorageFormat_RoundTrip(t *testing.T) {
 
 	version := extractVersion(storageText)
 	require.NotZero(t, version)
-	require.Equal(t, originalVersion, version)
+	require.Equal(t, original.Version.Number, version)
 
 	// 3. Extract body (skip header), append a marker in raw XHTML.
 	storageBody := extractPageBody(storageText)
@@ -684,7 +612,7 @@ func TestSmoke_WriteStorageFormat_RoundTrip(t *testing.T) {
 			"action": "update",
 			"items": []any{map[string]any{
 				"page_id":        pageID,
-				"title":          originalPage.Title,
+				"title":          original.Title,
 				"version_number": version,
 				"format":         "storage",
 				"body":           modifiedStorage,
@@ -698,12 +626,12 @@ func TestSmoke_WriteStorageFormat_RoundTrip(t *testing.T) {
 	// 5. Read back via raw API and verify.
 	updatedPage, err := env.client.GetPage(ctx, pageID)
 	require.NoError(t, err)
-	assert.Greater(t, updatedPage.Version.Number, originalVersion)
+	assert.Greater(t, updatedPage.Version.Number, original.Version.Number)
 	assert.Contains(t, updatedPage.Body.Storage.Value, "Storage format smoke test",
 		"marker should be in the updated page")
 
 	// 6. Verify macros survived the storage-format round-trip.
-	originalMacroCount := strings.Count(originalStorage, "<ac:structured-macro")
+	originalMacroCount := strings.Count(original.Body.Storage.Value, "<ac:structured-macro")
 	updatedMacroCount := strings.Count(updatedPage.Body.Storage.Value, "<ac:structured-macro")
 	t.Logf("Macros: original=%d, after storage write=%d", originalMacroCount, updatedMacroCount)
 	assert.Equal(t, originalMacroCount, updatedMacroCount,
@@ -805,38 +733,7 @@ func TestSmoke_EditRoundTrip_MacrosPreserved(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 1. Backup via raw API.
-	originalPage, err := env.client.GetPage(ctx, pageID)
-	require.NoError(t, err)
-	originalBody := originalPage.Body.Storage.Value
-	originalVersion := originalPage.Version.Number
-
-	t.Cleanup(func() {
-		// Restore original page with retry on 409.
-		for attempt := 0; attempt < 3; attempt++ {
-			if attempt > 0 {
-				time.Sleep(time.Duration(attempt) * time.Second)
-			}
-			page, err := env.client.GetPage(ctx, pageID)
-			if err != nil {
-				t.Logf("restore: GetPage failed: %v", err)
-				continue
-			}
-			_, err = env.client.UpdatePage(ctx, pageID, map[string]any{
-				"id": pageID, "status": "current", "title": originalPage.Title,
-				"version": map[string]any{"number": page.Version.Number + 1},
-				"body": map[string]any{"storage": map[string]any{
-					"value": originalBody, "representation": "storage",
-				}},
-			})
-			if err == nil {
-				t.Log("restore: page restored successfully")
-				return
-			}
-			t.Logf("restore attempt %d failed: %v", attempt+1, err)
-		}
-		t.Error("failed to restore page after 3 attempts")
-	})
+	original := snapshotAndRestorePage(t, env, pageID)
 
 	// 2. Read via MCP.
 	result, err := env.session.CallTool(ctx, &mcp.CallToolParams{
@@ -869,7 +766,7 @@ func TestSmoke_EditRoundTrip_MacrosPreserved(t *testing.T) {
 			"action": "update",
 			"items": []any{map[string]any{
 				"page_id":        pageID,
-				"title":          originalPage.Title,
+				"title":          original.Title,
 				"version_number": version,
 				"body":           modifiedBody,
 			}},
@@ -881,7 +778,7 @@ func TestSmoke_EditRoundTrip_MacrosPreserved(t *testing.T) {
 	// 5. Re-read via raw API and verify macros survive.
 	updatedPage, err := env.client.GetPage(ctx, pageID)
 	require.NoError(t, err)
-	assert.Greater(t, updatedPage.Version.Number, originalVersion)
+	assert.Greater(t, updatedPage.Version.Number, original.Version.Number)
 
 	// Storage format should still contain ac:structured-macro elements.
 	assert.Contains(t, updatedPage.Body.Storage.Value, "ac:structured-macro",
@@ -889,8 +786,227 @@ func TestSmoke_EditRoundTrip_MacrosPreserved(t *testing.T) {
 
 	// Count macros in storage format (each has open + close tag).
 	macrosInStorage := strings.Count(updatedPage.Body.Storage.Value, "<ac:structured-macro")
-	originalMacrosInStorage := strings.Count(originalBody, "<ac:structured-macro")
+	originalMacrosInStorage := strings.Count(original.Body.Storage.Value, "<ac:structured-macro")
 	t.Logf("Macros: original=%d, after edit=%d", originalMacrosInStorage, macrosInStorage)
 	assert.Equal(t, originalMacrosInStorage, macrosInStorage,
 		"macro count changed after round-trip")
+}
+
+// TestSmoke_Append exercises the append action against a live Confluence page.
+// Requires SMOKE_PAGE_ID to be set. Appends a sentinel note to the end of the
+// page, reads back, asserts the note is present and macro count is unchanged,
+// then restores the original storage body.
+func TestSmoke_Append(t *testing.T) {
+	pageID := smokePageID()
+	if pageID == "" {
+		t.Skip("SMOKE_PAGE_ID not set")
+	}
+	env := newLiveEnv(t)
+	original := snapshotAndRestorePage(t, env, pageID)
+	originalMacros := strings.Count(original.Body.Storage.Value, "<ac:structured-macro")
+
+	sentinel := fmt.Sprintf("Smoke append sentinel %d", time.Now().UnixNano())
+
+	// Dry-run first.
+	dry := callTool(t, env.session, "confluence_write", map[string]any{
+		"action":  "append",
+		"dry_run": true,
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     sentinel,
+			"position": "end",
+		}},
+	})
+	assert.Contains(t, dry, "Would append")
+	assert.Contains(t, dry, `"position": "end"`)
+
+	// Real append.
+	text := callTool(t, env.session, "confluence_write", map[string]any{
+		"action": "append",
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     sentinel,
+			"position": "end",
+		}},
+	})
+	assert.Contains(t, text, "Appended to")
+
+	// Read back via raw client and verify.
+	updated, err := env.client.GetPage(context.Background(), pageID)
+	require.NoError(t, err)
+	assert.Greater(t, updated.Version.Number, original.Version.Number)
+	assert.Contains(t, updated.Body.Storage.Value, sentinel, "sentinel missing from updated page")
+	updatedMacros := strings.Count(updated.Body.Storage.Value, "<ac:structured-macro")
+	assert.Equal(t, originalMacros, updatedMacros, "macro count changed after append")
+}
+
+// snapshotAndRestorePage takes a snapshot of a Confluence page and registers a
+// t.Cleanup hook that restores the original storage body after the test. Used
+// by the append smoke tests so each one runs against an identical starting page.
+func snapshotAndRestorePage(t *testing.T, env *liveEnv, pageID string) *confluence.Page {
+	t.Helper()
+	ctx := context.Background()
+	original, err := env.client.GetPage(ctx, pageID)
+	require.NoError(t, err, "fetching original page for backup")
+	originalStorage := original.Body.Storage.Value
+	originalTitle := original.Title
+	t.Logf("Backup: version=%d, title=%q, storage=%d bytes",
+		original.Version.Number, originalTitle, len(originalStorage))
+
+	t.Cleanup(func() {
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt) * time.Second)
+			}
+			current, err := env.client.GetPage(ctx, pageID)
+			if err != nil {
+				continue
+			}
+			_, err = env.client.UpdatePage(ctx, pageID, map[string]any{
+				"id":     pageID,
+				"status": "current",
+				"title":  originalTitle,
+				"version": map[string]any{
+					"number": current.Version.Number + 1,
+				},
+				"body": map[string]any{
+					"storage": map[string]any{
+						"value":          originalStorage,
+						"representation": "storage",
+					},
+				},
+			})
+			if err == nil {
+				return
+			}
+		}
+		t.Logf("ERROR: could not restore page after 3 attempts")
+	})
+	return original
+}
+
+// TestSmoke_Append_AfterHeading exercises position=after_heading against a
+// real heading. This is the most likely place the heading locator could
+// disagree with real storage (entities, local-id attrs, nested formatting),
+// so we target a heading from the all-elements fixture.
+func TestSmoke_Append_AfterHeading(t *testing.T) {
+	pageID := smokePageID()
+	if pageID == "" {
+		t.Skip("SMOKE_PAGE_ID not set")
+	}
+	env := newLiveEnv(t)
+	original := snapshotAndRestorePage(t, env, pageID)
+
+	const heading = "27. Final Verification Notes"
+	sentinel := fmt.Sprintf("Smoke after_heading sentinel %d", time.Now().UnixNano())
+
+	text := callTool(t, env.session, "confluence_write", map[string]any{
+		"action": "append",
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     sentinel,
+			"position": "after_heading",
+			"heading":  heading,
+		}},
+	})
+	assert.Contains(t, text, "Appended to")
+
+	updated, err := env.client.GetPage(context.Background(), pageID)
+	require.NoError(t, err)
+	assert.Greater(t, updated.Version.Number, original.Version.Number)
+
+	storage := updated.Body.Storage.Value
+	assert.Contains(t, storage, sentinel)
+	assert.Contains(t, storage, heading)
+	// Sentinel must appear after the target heading but before the next h2.
+	sentinelIdx := strings.Index(storage, sentinel)
+	headingIdx := strings.Index(storage, heading)
+	nextHeadingIdx := strings.Index(storage, "28. Additional Headings")
+	require.Positive(t, sentinelIdx, "sentinel missing")
+	require.Positive(t, headingIdx, "target heading missing")
+	require.Positive(t, nextHeadingIdx, "next heading missing")
+	assert.Greater(t, sentinelIdx, headingIdx, "sentinel should appear after target heading")
+	assert.Less(t, sentinelIdx, nextHeadingIdx, "sentinel should appear before next h2")
+}
+
+// TestSmoke_Append_ReplaceSection exercises position=replace_section. Replaces
+// content under a known heading, asserts the old content is gone, the fragment
+// is present, and the next heading survives (no cross-layout-boundary walk).
+func TestSmoke_Append_ReplaceSection(t *testing.T) {
+	pageID := smokePageID()
+	if pageID == "" {
+		t.Skip("SMOKE_PAGE_ID not set")
+	}
+	env := newLiveEnv(t)
+	original := snapshotAndRestorePage(t, env, pageID)
+
+	const heading = "27. Final Verification Notes"
+	const oldContentMarker = "Check that real Confluence macros (TOC, Jira, excerpt"
+	require.Contains(t, original.Body.Storage.Value, oldContentMarker,
+		"fixture page unexpectedly missing reference content — test cannot verify replace")
+
+	sentinel := fmt.Sprintf("Smoke replace_section sentinel %d", time.Now().UnixNano())
+
+	text := callTool(t, env.session, "confluence_write", map[string]any{
+		"action": "append",
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     sentinel,
+			"position": "replace_section",
+			"heading":  heading,
+		}},
+	})
+	assert.Contains(t, text, "Appended to")
+
+	updated, err := env.client.GetPage(context.Background(), pageID)
+	require.NoError(t, err)
+
+	storage := updated.Body.Storage.Value
+	assert.Contains(t, storage, heading, "target heading should still be present")
+	assert.Contains(t, storage, sentinel, "sentinel should be present")
+	assert.NotContains(t, storage, oldContentMarker,
+		"old content under section 27 should have been replaced")
+	assert.Contains(t, storage, "28. Additional Headings",
+		"next heading should survive — we must not cross the layout-cell boundary")
+}
+
+// TestSmoke_Append_StorageMacro exercises appending a macro via format=storage.
+// Markdown does not synthesise new macros on write (GFM alerts are a read-only
+// projection of existing macros), so adding a macro requires raw storage XHTML.
+// Verifies the macro lands on the real page and macro count rises by exactly 1.
+func TestSmoke_Append_StorageMacro(t *testing.T) {
+	pageID := smokePageID()
+	if pageID == "" {
+		t.Skip("SMOKE_PAGE_ID not set")
+	}
+	env := newLiveEnv(t)
+	original := snapshotAndRestorePage(t, env, pageID)
+	originalMacros := strings.Count(original.Body.Storage.Value, "<ac:structured-macro")
+
+	sentinel := fmt.Sprintf("Smoke storage-macro sentinel %d", time.Now().UnixNano())
+	fragment := fmt.Sprintf(
+		`<ac:structured-macro ac:name="note" ac:schema-version="1"><ac:rich-text-body><p>%s</p></ac:rich-text-body></ac:structured-macro>`,
+		sentinel,
+	)
+
+	text := callTool(t, env.session, "confluence_write", map[string]any{
+		"action": "append",
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     fragment,
+			"format":   "storage",
+			"position": "end",
+		}},
+	})
+	assert.Contains(t, text, "Appended to")
+
+	updated, err := env.client.GetPage(context.Background(), pageID)
+	require.NoError(t, err)
+
+	storage := updated.Body.Storage.Value
+	assert.Contains(t, storage, sentinel, "sentinel missing from updated page")
+	updatedMacros := strings.Count(storage, "<ac:structured-macro")
+	assert.Equal(t, originalMacros+1, updatedMacros,
+		"expected macro count to increase by 1, got %d -> %d", originalMacros, updatedMacros)
+	assert.Contains(t, storage, `ac:name="note"`, "storage should contain the appended note macro")
 }

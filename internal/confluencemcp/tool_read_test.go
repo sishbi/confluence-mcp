@@ -654,6 +654,89 @@ func TestChunkingTokenRoundtripSingleLongSection(t *testing.T) {
 	assert.Empty(t, nextToken, "must terminate with no token")
 }
 
+func TestReadNextChunk_InvalidToken(t *testing.T) {
+	h := &handlers{client: &mockClient{}}
+	result, _, err := h.readNextChunk(context.Background(), "not-valid-base64!!!")
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, firstText(t, result), "invalid next_page_token")
+}
+
+func TestReadNextChunk_TokenMissingPageID(t *testing.T) {
+	token, err := encodeChunkToken(chunkCursor{Mode: "section"})
+	require.NoError(t, err)
+
+	h := &handlers{client: &mockClient{}}
+	result, _, err := h.readNextChunk(context.Background(), token)
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, firstText(t, result), "missing page_id")
+}
+
+func TestReadNextChunk_CacheMiss_RefetchError(t *testing.T) {
+	token, err := encodeChunkToken(chunkCursor{PageID: "p1", Mode: "section"})
+	require.NoError(t, err)
+
+	h := &handlers{client: &mockClient{
+		GetPageFn: func(_ context.Context, _ string) (*confluence.Page, error) {
+			return nil, assert.AnError
+		},
+	}}
+	result, _, err := h.readNextChunk(context.Background(), token)
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, firstText(t, result), "error fetching page")
+}
+
+func TestReadNextChunk_CacheMiss_SilentRefetch(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("<h2>S1</h2><p>one</p>")
+	for i := 0; i < 1000; i++ {
+		fmt.Fprintf(&body, "<p>padding %04d</p>", i)
+	}
+	body.WriteString("<h2>S2</h2><p>two</p>")
+
+	h := &handlers{client: &mockClient{
+		GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
+			return &confluence.Page{
+				ID: id, Title: "T",
+				Version: confluence.PageVersion{Number: 1},
+				Body:    confluence.PageBody{Storage: confluence.StorageBody{Value: body.String()}},
+			}, nil
+		},
+	}}
+
+	token, err := encodeChunkToken(chunkCursor{PageID: "p1", Mode: "section", SectionIdx: 1})
+	require.NoError(t, err)
+
+	result, _, err := h.readNextChunk(context.Background(), token)
+	require.NoError(t, err)
+	assert.False(t, result.IsError, "cache-miss continuation should silently refetch and succeed")
+	text := firstText(t, result)
+	assert.Contains(t, text, "continuation")
+}
+
+func TestChunkToken_DecodeBadBase64(t *testing.T) {
+	_, err := decodeChunkToken("!!!not-base64!!!")
+	assert.Error(t, err)
+}
+
+func TestChunkToken_DecodeBadJSON(t *testing.T) {
+	// Valid base64, invalid JSON payload.
+	bad := "bm90LWpzb24" // "not-json" base64 raw-url encoded
+	_, err := decodeChunkToken(bad)
+	assert.Error(t, err)
+}
+
+func TestChunkToken_Roundtrip(t *testing.T) {
+	orig := chunkCursor{PageID: "p1", Mode: "offset", Offset: 12345}
+	token, err := encodeChunkToken(orig)
+	require.NoError(t, err)
+	decoded, err := decodeChunkToken(token)
+	require.NoError(t, err)
+	assert.Equal(t, orig, decoded)
+}
+
 func TestCache_MacroTTL(t *testing.T) {
 	c := &pageCache{}
 

@@ -26,6 +26,10 @@ type WriteItem struct {
 	VersionNumber int    `json:"version_number,omitempty"`
 	CommentID     string `json:"comment_id,omitempty"`
 	Label         string `json:"label,omitempty"`
+	// Append-specific. Position is one of "end" (default), "after_heading",
+	// "replace_section". Heading is required for the latter two.
+	Position string `json:"position,omitempty"`
+	Heading  string `json:"heading,omitempty"`
 }
 
 // WriteArgs holds the arguments for the confluence_write tool.
@@ -38,6 +42,7 @@ type WriteArgs struct {
 var validActions = map[string]bool{
 	"create":       true,
 	"update":       true,
+	"append":       true,
 	"delete":       true,
 	"comment":      true,
 	"edit_comment": true,
@@ -51,7 +56,7 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 		return textResult("items must not be empty", true), nil, nil
 	}
 	if !validActions[args.Action] {
-		return textResult(fmt.Sprintf("unknown action %q — use: create, update, delete, comment, edit_comment, add_label, remove_label", args.Action), true), nil, nil
+		return textResult(fmt.Sprintf("unknown action %q — use: create, update, append, delete, comment, edit_comment, add_label, remove_label", args.Action), true), nil, nil
 	}
 
 	h.logger().InfoContext(ctx, "write_action",
@@ -90,6 +95,8 @@ func (h *handlers) dispatchWriteItem(ctx context.Context, action string, item Wr
 		return h.writeCreate(ctx, item, dryRun)
 	case "update":
 		return h.writeUpdate(ctx, item, dryRun)
+	case "append":
+		return h.writeAppend(ctx, item, dryRun)
 	case "delete":
 		return h.writeDelete(ctx, item, dryRun)
 	case "comment":

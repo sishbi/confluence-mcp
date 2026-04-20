@@ -298,6 +298,63 @@ func TestAddPageLabel(t *testing.T) {
 	assert.Equal(t, "new-label", label.Name)
 }
 
+func TestAddPageLabel_FallbackToFirstResult(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// API returned labels but none match the requested name (unlikely but handled).
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []Label{{ID: "l1", Name: "some-other-label"}},
+		})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	label, err := c.AddPageLabel(context.Background(), "123", "requested")
+	require.NoError(t, err)
+	assert.Equal(t, "some-other-label", label.Name, "falls back to first result when exact match missing")
+}
+
+func TestAddPageLabel_FallbackWhenEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []Label{}})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	label, err := c.AddPageLabel(context.Background(), "123", "requested")
+	require.NoError(t, err)
+	assert.Equal(t, "requested", label.Name, "falls back to requested name when results are empty")
+	assert.Empty(t, label.ID)
+}
+
+func TestBaseURL(t *testing.T) {
+	c := newTestClient(t, "https://example.com")
+	assert.Equal(t, "https://example.com", c.BaseURL())
+}
+
+func TestGetUser(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/wiki/rest/api/user", r.URL.Path)
+		assert.Equal(t, "acc-42", r.URL.Query().Get("accountId"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(User{AccountID: "acc-42", DisplayName: "Jane"})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	user, err := c.GetUser(context.Background(), "acc-42")
+	require.NoError(t, err)
+	assert.Equal(t, "Jane", user.DisplayName)
+}
+
+func TestAPIError_Error(t *testing.T) {
+	err := &APIError{StatusCode: 409, Body: "StaleStateException"}
+	assert.Contains(t, err.Error(), "409")
+	assert.Contains(t, err.Error(), "StaleStateException")
+}
+
 func TestRemovePageLabel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodDelete, r.Method)

@@ -171,13 +171,14 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body io.Reader
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
+		body := strings.TrimSpace(string(b))
 		c.log.ErrorContext(ctx, "confluence_api_error",
 			"method", method,
 			"path", path,
 			"status", resp.StatusCode,
-			"body", strings.TrimSpace(string(b)),
+			"body", body,
 		)
-		return fmt.Errorf("confluence API error %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return &APIError{StatusCode: resp.StatusCode, Body: body}
 	}
 
 	if target == nil {
