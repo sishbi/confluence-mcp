@@ -1,0 +1,83 @@
+version: 2
+
+project_name: confluence-mcp
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: confluence-mcp
+    binary: confluence-mcp
+    main: ./cmd/confluence-mcp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: confluence-mcp
+    ids:
+      - confluence-mcp
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+# Use GitHub native release notes (same as "Auto-generate release notes" on GitHub).
+changelog:
+  use: github
+
+# Homebrew cask published to Casks/ directory in this repo.
+# Install: brew tap sishbi/confluence-mcp https://github.com/sishbi/confluence-mcp
+#          brew install confluence-mcp
+homebrew_casks:
+  - name: confluence-mcp
+    ids:
+      - confluence-mcp
+    binaries:
+      - confluence-mcp
+    directory: Casks
+    repository:
+      owner: sishbi
+      name: confluence-mcp
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    homepage: https://github.com/sishbi/confluence-mcp
+    description: Confluence MCP server — give your AI assistant full Confluence access
+    license: MIT
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/confluence-mcp"]
+          end
+
+# Multi-arch Docker image pushed to Docker Hub as :latest only.
+dockers_v2:
+  - id: confluence-mcp
+    ids:
+      - confluence-mcp
+    dockerfile: Dockerfile
+    images:
+      - sishbi/confluence-mcp
+    tags:
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64

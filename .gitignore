@@ -1,0 +1,8 @@
+bin/
+.mcp.json
+.claude/
+.idea/
+data/
+coverage.out
+scripts/run-smoke-test.sh
+scripts/run-install-mcp.sh
