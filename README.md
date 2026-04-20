@@ -73,7 +73,8 @@ brew install confluence-mcp
 
 **Docker:**
 ```bash
-docker run -e CONFLUENCE_URL=... -e CONFLUENCE_EMAIL=... -e CONFLUENCE_API_TOKEN=... sishbi/confluence-mcp
+docker run -e CONFLUENCE_URL=... -e CONFLUENCE_EMAIL=... -e CONFLUENCE_API_TOKEN=... \
+  sishbi/confluence-mcp
 ```
 
 **From source:**
