@@ -63,7 +63,11 @@ homebrew_casks:
     repository:
       owner: sishbi
       name: confluence-mcp
-      token: "{{ .Env.GITHUB_TOKEN }}"
+      # Use RELEASE_PAT so the cask PR is authored by a human account, not
+      # github-actions[bot]. PRs created by GITHUB_TOKEN do not trigger other
+      # workflows (CI, PR Title), so the required status checks would never
+      # report and the PR could never be merged.
+      token: "{{ .Env.RELEASE_PAT }}"
       branch: "brew/{{ .ProjectName }}-{{ .Tag }}"
       pull_request:
         enabled: true
