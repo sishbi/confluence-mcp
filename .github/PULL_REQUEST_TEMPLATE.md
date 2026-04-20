@@ -1,3 +1,11 @@
+<!--
+PR title must follow Conventional Commits (enforced by the "Validate PR title" check):
+  <type>(optional-scope): <subject>
+Types: feat, fix, chore, docs, refactor, test, ci, build, perf, style, revert
+Use `feat!:` or add `BREAKING CHANGE:` in the body for a breaking change.
+The title drives the release-please changelog when this PR is squash-merged.
+-->
+
 ## Summary
 
 <!-- What changed and why, in 1-3 bullets. -->

@@ -41,6 +41,9 @@ checksum:
   name_template: checksums.txt
 
 release:
+  # release-please creates the GitHub release with changelog when its Release PR
+  # merges; GoReleaser only uploads artifacts onto it.
+  mode: append
   replace_existing_artifacts: true
 
 # Use GitHub native release notes (same as "Auto-generate release notes" on GitHub).

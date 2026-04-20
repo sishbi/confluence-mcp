@@ -91,7 +91,21 @@ Do not skip any of these. If lint or tests fail, fix before moving on. Smoke tes
 
 ## CI
 
-GitHub Actions runs lint, test (with `-race` and coverage), and a tag-gated smoke-test compile on push/PR to main. See `.github/workflows/ci.yml`. Release builds via GoReleaser on `v*` tags: see `.github/workflows/release.yml`.
+GitHub Actions runs lint, test (with `-race` and coverage), and a tag-gated smoke-test compile on push/PR to main. See `.github/workflows/ci.yml`. A separate `PR Title` workflow validates the PR title against Conventional Commits (`.github/workflows/pr-title.yml`). Release builds via GoReleaser on `v*` tags: see `.github/workflows/release.yml`.
+
+## Releases
+
+Releases are driven by [release-please](https://github.com/googleapis/release-please) (`.github/workflows/release-please.yml`). Every merge to `main` updates (or opens) a standing Release PR titled `chore(main): release X.Y.Z`, containing the changelog diff and version bump computed from Conventional Commits since the last tag. Merging the Release PR cuts the tag, which triggers GoReleaser.
+
+**Conventional Commits are mandatory for PR titles** — they're the source of the changelog and version bump. Format:
+
+```
+<type>(optional-scope): <subject>
+```
+
+Types in use: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `build`, `perf`, `style`, `revert`. Use `feat!:` (or a `BREAKING CHANGE:` footer) for breaking changes. In pre-1.0 (`bump-minor-pre-major: true`, `bump-patch-for-minor-pre-major: true`), `feat:` bumps the patch and a breaking change bumps the minor — no accidental 1.0 cut.
+
+A fine-grained PAT stored as `RELEASE_PAT` (Contents: R/W, owned by a repo admin) is required for release-please. `GITHUB_TOKEN` pushes don't trigger downstream workflows — the PAT is what makes the tag push fire `release.yml`.
 
 ## Distribution
 
