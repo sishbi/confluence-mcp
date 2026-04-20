@@ -64,9 +64,12 @@ homebrew_casks:
       owner: sishbi
       name: confluence-mcp
       token: "{{ .Env.GITHUB_TOKEN }}"
+      branch: "brew/{{ .ProjectName }}-{{ .Tag }}"
       pull_request:
         enabled: true
         base:
+          owner: sishbi
+          name: confluence-mcp
           branch: main
     homepage: https://github.com/sishbi/confluence-mcp
     description: Confluence MCP server — give your AI assistant full Confluence access
