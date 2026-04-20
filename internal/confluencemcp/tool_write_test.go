@@ -420,6 +420,52 @@ func TestWriteCreate_StorageFormat(t *testing.T) {
 	assert.Equal(t, `<p>Raw XHTML body.</p>`, value)
 }
 
+func TestHandleWrite_DispatchesAppend(t *testing.T) {
+	var capturedPayload map[string]any
+	h := &handlers{
+		client: &mockClient{
+			GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
+				return &confluence.Page{
+					ID:      id,
+					Title:   "Test",
+					Version: confluence.PageVersion{Number: 2},
+					Body: confluence.PageBody{Storage: confluence.StorageBody{
+						Value: `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell><p>orig</p></ac:layout-cell></ac:layout-section></ac:layout>`,
+					}},
+				}, nil
+			},
+			UpdatePageFn: func(_ context.Context, id string, payload map[string]any) (*confluence.Page, error) {
+				capturedPayload = payload
+				return &confluence.Page{ID: id, Title: "Test"}, nil
+			},
+		},
+	}
+
+	args := WriteArgs{
+		Action: "append",
+		Items: []WriteItem{
+			{PageID: "p1", Body: "A new note.", Position: "end"},
+		},
+	}
+	result, _, err := h.handleWrite(context.Background(), nil, args)
+	assert.NoError(t, err)
+	assert.False(t, result.IsError)
+
+	body := capturedPayload["body"].(map[string]any)
+	storage := body["storage"].(map[string]any)
+	value := storage["value"].(string)
+	assert.Contains(t, value, "A new note.")
+	assert.Contains(t, value, "orig") // original preserved
+}
+
+func TestWriteTool_DescriptionMentionsAppend(t *testing.T) {
+	desc := writeTool.Description
+	assert.Contains(t, desc, "append:")
+	assert.Contains(t, desc, "end")
+	assert.Contains(t, desc, "after_heading")
+	assert.Contains(t, desc, "replace_section")
+}
+
 func TestHandleWrite_CacheEviction(t *testing.T) {
 	h := &handlers{
 		client: &mockClient{

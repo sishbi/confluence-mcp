@@ -894,3 +894,90 @@ func TestSmoke_EditRoundTrip_MacrosPreserved(t *testing.T) {
 	assert.Equal(t, originalMacrosInStorage, macrosInStorage,
 		"macro count changed after round-trip")
 }
+
+// TestSmoke_Append exercises the append action against a live Confluence page.
+// Requires SMOKE_PAGE_ID to be set. Appends a sentinel note to the end of the
+// page, reads back, asserts the note is present and macro count is unchanged,
+// then restores the original storage body.
+func TestSmoke_Append(t *testing.T) {
+	pageID := smokePageID()
+	if pageID == "" {
+		t.Skip("SMOKE_PAGE_ID not set")
+	}
+	env := newLiveEnv(t)
+	cs := env.session
+	ctx := context.Background()
+
+	// Snapshot for restore.
+	original, err := env.client.GetPage(ctx, pageID)
+	require.NoError(t, err, "fetching original page for backup")
+	originalStorage := original.Body.Storage.Value
+	originalTitle := original.Title
+	originalMacros := strings.Count(originalStorage, "<ac:structured-macro")
+	t.Logf("Backup: version=%d, title=%q, storage=%d bytes, macros=%d",
+		original.Version.Number, originalTitle, len(originalStorage), originalMacros)
+
+	t.Cleanup(func() {
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt) * time.Second)
+			}
+			current, err := env.client.GetPage(ctx, pageID)
+			if err != nil {
+				continue
+			}
+			_, err = env.client.UpdatePage(ctx, pageID, map[string]any{
+				"id":     pageID,
+				"status": "current",
+				"title":  originalTitle,
+				"version": map[string]any{
+					"number": current.Version.Number + 1,
+				},
+				"body": map[string]any{
+					"storage": map[string]any{
+						"value":          originalStorage,
+						"representation": "storage",
+					},
+				},
+			})
+			if err == nil {
+				return
+			}
+		}
+		t.Logf("ERROR: could not restore page after 3 attempts")
+	})
+
+	sentinel := fmt.Sprintf("Smoke append sentinel %d", time.Now().UnixNano())
+
+	// Dry-run first.
+	dry := callTool(t, cs, "confluence_write", map[string]any{
+		"action":  "append",
+		"dry_run": true,
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     sentinel,
+			"position": "end",
+		}},
+	})
+	assert.Contains(t, dry, "Would append")
+	assert.Contains(t, dry, `"position": "end"`)
+
+	// Real append.
+	text := callTool(t, cs, "confluence_write", map[string]any{
+		"action": "append",
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     sentinel,
+			"position": "end",
+		}},
+	})
+	assert.Contains(t, text, "Appended to")
+
+	// Read back via raw client and verify.
+	updated, err := env.client.GetPage(ctx, pageID)
+	require.NoError(t, err)
+	assert.Greater(t, updated.Version.Number, original.Version.Number)
+	assert.Contains(t, updated.Body.Storage.Value, sentinel, "sentinel missing from updated page")
+	updatedMacros := strings.Count(updated.Body.Storage.Value, "<ac:structured-macro")
+	assert.Equal(t, originalMacros, updatedMacros, "macro count changed after append")
+}

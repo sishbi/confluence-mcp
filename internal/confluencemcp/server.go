@@ -31,7 +31,8 @@ var writeTool = &mcp.Tool{
 
 Actions:
 - create: Create pages. Each item needs: space_id, title. Optional: body (Markdown), parent_id, status (current/draft).
-- update: Update pages. Each item needs: page_id, title, version_number. Optional: body (Markdown), status.
+- update: Update pages. Each item needs: page_id, title, version_number. Optional: body (Markdown), status. Replaces the full body.
+- append: Insert or replace a fragment in an existing page without sending the full body. Each item needs: page_id, body (Markdown by default; storage if format="storage"). Optional: position (one of "end" (default), "after_heading", "replace_section"), heading (required for after_heading / replace_section; exact, case-sensitive match), version_number (optional optimistic concurrency). Dry-run returns a structured preview including the storage fragment, boundary info, and size delta.
 - delete: Delete pages. Each item needs: page_id.
 - comment: Add footer comments. Each item needs: page_id, body (Markdown).
 - edit_comment: Edit comments. Each item needs: comment_id, body (Markdown), version_number.
@@ -40,7 +41,8 @@ Actions:
 
 All actions support dry_run=true to preview without executing. Body fields accept Markdown by default (auto-converted to Confluence storage format).
 Set format="storage" on an item to pass raw Confluence XHTML directly — use this when adding or modifying macros.
-When updating a page, version_number is required — get it from confluence_read first.`,
+When updating a page, version_number is required — get it from confluence_read first.
+Prefer "append" over "update" when only adding or replacing a section: it avoids re-sending the full body and preserves macros exactly.`,
 }
 
 func NewServer(client ConfluenceClient, currentUser *confluence.User, logger *slog.Logger) *mcp.Server {
