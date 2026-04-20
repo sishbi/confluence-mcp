@@ -154,10 +154,6 @@ No accidental 1.0 cut. Remove `bump-minor-pre-major` / `bump-patch-for-minor-pre
 
 If a PR contains only non-bumping types (e.g. `docs:`, `chore:`) but you still want to cut a release when it merges, append a `Release-As: X.Y.Z` trailer to the squash-merge commit message. release-please will cut that version regardless of commit types.
 
-### First-run requirements
-
-- A `RELEASE_PAT` repository secret is required — a fine-grained PAT with `Contents: Read and write` on this repo, owned by a repo admin. Tag pushes from `GITHUB_TOKEN` do not trigger downstream workflows; the PAT is what makes the tag push fire the `Release` workflow.
-
 ## License
 
 MIT
