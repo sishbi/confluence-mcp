@@ -5,22 +5,22 @@ cask "confluence-mcp" do
   on_macos do
     on_intel do
       url "https://github.com/sishbi/confluence-mcp/releases/download/v#{version}/confluence-mcp_darwin_amd64.tar.gz"
-      sha256 "7223f3c18d693a806ded56e24234a8129e91b2c24714de3c4eb31494b04af468"
+      sha256 "43a2cef9fc05331ef2135b977bb7c18aa92ff518dd4a0964e4eb72e5cb67e0bb"
     end
     on_arm do
       url "https://github.com/sishbi/confluence-mcp/releases/download/v#{version}/confluence-mcp_darwin_arm64.tar.gz"
-      sha256 "72193cb932019bdafde6725203e5dcaa2caddaad1ba7579eaa2c35ffd616ecc1"
+      sha256 "fe995f7ec57fcb08ee1884811a0a7e9e485023aac08ff4b56d76b392b283b7a5"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/sishbi/confluence-mcp/releases/download/v#{version}/confluence-mcp_linux_amd64.tar.gz"
-      sha256 "1b7278f4caeabadde301c455971111a622883fc55a2387b9685b2ef0d74923fa"
+      sha256 "606465633bab48d1e249b11c4d11c85383bab198ff44ae21c06496433d43d5dc"
     end
     on_arm do
       url "https://github.com/sishbi/confluence-mcp/releases/download/v#{version}/confluence-mcp_linux_arm64.tar.gz"
-      sha256 "951904431635edbfd62d52f16d88c32866eacea0dd9c330b2f8c9c7ed125fd0e"
+      sha256 "44408feb268166c8c87e9fc0bb7f4b172d378bd6c10b708c4c0b820572245f59"
     end
   end
 
