@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.6](https://github.com/sishbi/confluence-mcp/compare/v0.0.5...v0.0.6) (2026-04-20)
+
+
+### Miscellaneous Chores
+
+* trigger 0.0.6 release to exercise auto-merge cask flow ([#14](https://github.com/sishbi/confluence-mcp/issues/14)) ([61cc8e2](https://github.com/sishbi/confluence-mcp/commit/61cc8e28cc3b626fa57edddfc8ff9ba67074ff9d))
+
 ## [0.0.5](https://github.com/sishbi/confluence-mcp/compare/v0.0.4...v0.0.5) (2026-04-20)
 
 
