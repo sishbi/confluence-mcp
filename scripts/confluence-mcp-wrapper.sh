@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 # Wrapper that launches confluence-mcp and redirects logs to a file.
 # Used by install-mcp.sh when --debug is passed.
 #
