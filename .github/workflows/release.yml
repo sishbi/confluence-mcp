@@ -6,7 +6,8 @@ on:
       - "v*"
 
 permissions:
-  contents: write  # create GitHub releases and push Homebrew cask commit
+  contents: write       # create GitHub releases, tag, and push cask branch
+  pull-requests: write  # open the Homebrew cask bump PR
   packages: write
 
 jobs:
