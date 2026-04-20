@@ -6,4 +6,5 @@ data/
 coverage.out
 scripts/run-smoke-test.sh
 scripts/run-install-mcp.sh
+scripts/run-install-mcp-brew.sh
 scripts/run-docker-run.sh
