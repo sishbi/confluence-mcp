@@ -458,6 +458,78 @@ func TestHandleWrite_DispatchesAppend(t *testing.T) {
 	assert.Contains(t, value, "orig") // original preserved
 }
 
+func TestAppend_RetriesOn409_WhenVersionNotPinned(t *testing.T) {
+	const body = `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell><p>orig</p></ac:layout-cell></ac:layout-section></ac:layout>`
+
+	getCalls, updateCalls := 0, 0
+	h := &handlers{
+		client: &mockClient{
+			GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
+				getCalls++
+				// First GET returns stale version 5; second GET (after 409)
+				// returns the true current version 7.
+				ver := 5
+				if getCalls >= 2 {
+					ver = 7
+				}
+				return &confluence.Page{
+					ID:      id,
+					Title:   "Test",
+					Version: confluence.PageVersion{Number: ver},
+					Body:    confluence.PageBody{Storage: confluence.StorageBody{Value: body}},
+				}, nil
+			},
+			UpdatePageFn: func(_ context.Context, id string, _ map[string]any) (*confluence.Page, error) {
+				updateCalls++
+				if updateCalls == 1 {
+					return nil, &confluence.APIError{StatusCode: 409, Body: "StaleStateException"}
+				}
+				return &confluence.Page{ID: id, Title: "Test"}, nil
+			},
+		},
+	}
+
+	msg, err := h.writeAppend(context.Background(), WriteItem{
+		PageID:   "p1",
+		Body:     "A new line.",
+		Position: "end",
+	}, false)
+	require.NoError(t, err)
+	assert.Contains(t, msg, "Appended to")
+	assert.Equal(t, 2, getCalls, "expected a re-fetch after 409")
+	assert.Equal(t, 2, updateCalls, "expected a retry PUT after 409")
+}
+
+func TestAppend_NoRetryWhenVersionPinned(t *testing.T) {
+	updateCalls := 0
+	h := &handlers{
+		client: &mockClient{
+			GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
+				return &confluence.Page{
+					ID: id, Title: "Test",
+					Version: confluence.PageVersion{Number: 5},
+					Body: confluence.PageBody{Storage: confluence.StorageBody{
+						Value: `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell><p>orig</p></ac:layout-cell></ac:layout-section></ac:layout>`,
+					}},
+				}, nil
+			},
+			UpdatePageFn: func(_ context.Context, id string, _ map[string]any) (*confluence.Page, error) {
+				updateCalls++
+				return nil, &confluence.APIError{StatusCode: 409, Body: "StaleStateException"}
+			},
+		},
+	}
+
+	_, err := h.writeAppend(context.Background(), WriteItem{
+		PageID:        "p1",
+		Body:          "A new line.",
+		Position:      "end",
+		VersionNumber: 5, // caller pinned the version — surface the 409, no retry
+	}, false)
+	assert.Error(t, err)
+	assert.Equal(t, 1, updateCalls, "pinned version must not retry on 409")
+}
+
 func TestWriteTool_DescriptionMentionsAppend(t *testing.T) {
 	desc := writeTool.Description
 	assert.Contains(t, desc, "append:")

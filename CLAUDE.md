@@ -64,7 +64,7 @@ scripts/                        install-mcp.sh, confluence-mcp-wrapper.sh, smoke
 `internal/mdconv` is a pre/post-process pipeline over goldmark (MD→XHTML) and html-to-markdown/v2 (XHTML→MD).
 
 - Preprocessors pull Confluence-only constructs (mentions, emoticons, attachment images, anchor links, sub/sup, task lists, status lozenges, panels, view-file, ADF extensions, details, layouts, expand) out into HTML the standard tools can consume or into hidden `<!-- macro:mN -->` sentinels that round-trip verbatim.
-- Panels (including ADF panels) map to GFM alert syntax (`> [!NOTE]`, `[!WARNING]`, etc.); the alert marker is stripped on write-back.
+- Panels (including ADF panels) map to GFM alert syntax (`> [!NOTE]`, `[!WARNING]`, etc.); the alert marker is stripped on write-back. The mapping is **read-only**: a bare `> [!NOTE]` in a markdown fragment does NOT synthesise a new panel macro on write — it becomes a plain `<blockquote>`. Alert syntax only round-trips through an existing macro (paired with its `<!-- macro:mN -->` sentinel and a `MacroRegistry` entry). To add a new panel macro via `confluence_write`, use `format="storage"` with raw `<ac:structured-macro>`.
 - Status lozenges render as colour-keyed emoji (🟢/🔵/🔴/🟡/🟣/⚪).
 - Tables render as GFM with `colspan` repeat-and-annotate and `rowspan` ⬆ fill. Lists inside cells are flattened with `<br>` separators.
 - Macros are renumbered `m1..mN` in document order after extraction so rendered Markdown reads top-to-bottom.
