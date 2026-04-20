@@ -39,3 +39,8 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed through to .goreleaser.yaml for the Homebrew cask PR.
+          # GITHUB_TOKEN-authored PRs don't trigger workflows, so the required
+          # CI and PR Title checks would never report. RELEASE_PAT is a
+          # human-owned token, so its PRs trigger those workflows normally.
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}

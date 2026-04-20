@@ -12,7 +12,17 @@ jobs:
     name: Validate PR title
     runs-on: ubuntu-latest
     steps:
+      # Automated Homebrew cask bump PRs from GoReleaser have the hardcoded
+      # title "Brew cask update for ... version vX.Y.Z" which doesn't match
+      # Conventional Commits. Skip the check for those branches so the job
+      # reports success (required checks stay satisfied) without enforcing
+      # the title rule on machine-generated PRs.
+      - name: Skip for automated cask branches
+        if: startsWith(github.head_ref, 'brew/')
+        run: echo "Skipping title validation for automated cask branch '${{ github.head_ref }}'"
+
       - uses: amannn/action-semantic-pull-request@v5
+        if: ${{ !startsWith(github.head_ref, 'brew/') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
