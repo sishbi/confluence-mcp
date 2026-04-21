@@ -361,6 +361,61 @@ func TestHandleRead_ListComments(t *testing.T) {
 	assert.Contains(t, text, "c1")
 }
 
+func TestHandleRead_ListComments_ResolvesUserMentionsOnce(t *testing.T) {
+	const mention = `<ac:link><ri:user ri:account-id="acc-1"/></ac:link>`
+	var getUserCalls int
+	h := &handlers{
+		client: &mockClient{
+			GetUserFn: func(ctx context.Context, accountID string) (*confluence.User, error) {
+				getUserCalls++
+				return &confluence.User{AccountID: accountID, DisplayName: "Alice"}, nil
+			},
+			GetPageCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+				return []confluence.Comment{
+					{ID: "c1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Ping " + mention + "</p>"}}},
+					{ID: "c2", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Again " + mention + "</p>"}}},
+				}, "", nil
+			},
+		},
+	}
+
+	args := ReadArgs{Resource: "comments", PageID: "123"}
+	result, _, err := h.handleRead(context.Background(), nil, args)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	text := firstText(t, result)
+	assert.Contains(t, text, "@Alice")
+	assert.Contains(t, text, "acc-1")
+	assert.NotContains(t, text, "@user(acc-1)")
+	assert.Equal(t, 1, getUserCalls, "resolver should be shared so GetUser is called once per unique account id")
+}
+
+func TestHandleRead_ByURL_CommentResolvesUserMention(t *testing.T) {
+	const mention = `<ac:link><ri:user ri:account-id="acc-1"/></ac:link>`
+	h := &handlers{
+		client: &mockClient{
+			GetUserFn: func(ctx context.Context, accountID string) (*confluence.User, error) {
+				return &confluence.User{AccountID: accountID, DisplayName: "Bob"}, nil
+			},
+			GetCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
+				return &confluence.Comment{ID: commentID, Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Hi " + mention + "</p>"}}}, nil
+			},
+		},
+		cache: pageCache{},
+	}
+	// Seed the cache so the URL path returns comment-only (doesn't re-fetch page).
+	h.cache.put(&cachedPage{pageID: "4125", markdown: "", fetchedAt: time.Now()})
+
+	args := ReadArgs{URL: "https://x.atlassian.net/wiki/spaces/S/pages/4125/Title?focusedCommentId=c1"}
+	result, _, err := h.handleRead(context.Background(), nil, args)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	text := firstText(t, result)
+	assert.Contains(t, text, "@Bob")
+	assert.Contains(t, text, "acc-1")
+	assert.NotContains(t, text, "@user(acc-1)")
+}
+
 func TestHandleRead_ListComments_MissingPageID(t *testing.T) {
 	h := &handlers{client: &mockClient{}}
 

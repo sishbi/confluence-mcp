@@ -447,4 +447,43 @@ func TestSplice_ReplaceSection(t *testing.T) {
 			t.Errorf("want '<ul> x 1' in summary, got %v", res.Boundary.ReplacedElementSummary)
 		}
 	})
+
+	t.Run("fragment that redundantly starts with the target heading is de-duplicated", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>Data scrubbing</h2><p>old</p><h2>B</h2>`)
+		fragment := `<h2>Data scrubbing</h2><p>new</p>`
+		res, err := spliceReplaceSection(body, fragment, "Data scrubbing")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := fmt.Sprintf(cell, `<h2>Data scrubbing</h2><p>new</p><h2>B</h2>`)
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
+
+	t.Run("leading heading with different level but same text is stripped", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>A</h2><p>old</p><h2>B</h2>`)
+		fragment := `<h3>A</h3><p>new</p>`
+		res, err := spliceReplaceSection(body, fragment, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := fmt.Sprintf(cell, `<h2>A</h2><p>new</p><h2>B</h2>`)
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
+
+	t.Run("leading heading with different text is preserved", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>A</h2><p>old</p><h2>B</h2>`)
+		fragment := `<h3>Details</h3><p>new</p>`
+		res, err := spliceReplaceSection(body, fragment, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := fmt.Sprintf(cell, `<h2>A</h2><h3>Details</h3><p>new</p><h2>B</h2>`)
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
 }
