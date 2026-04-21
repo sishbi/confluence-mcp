@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.8](https://github.com/sishbi/confluence-mcp/compare/v0.0.7...v0.0.8) (2026-04-21)
+
+
+### Bug Fixes
+
+* resolve user mentions in comments and strip duplicate heading on replace_section ([#19](https://github.com/sishbi/confluence-mcp/issues/19)) ([01b8839](https://github.com/sishbi/confluence-mcp/commit/01b883926732e46e6a388e993a7cb00d26cb3e4c))
+
 ## [0.0.7](https://github.com/sishbi/confluence-mcp/compare/v0.0.6...v0.0.7) (2026-04-20)
 
 
