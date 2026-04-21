@@ -317,6 +317,8 @@ func TestSmoke_ReadComments(t *testing.T) {
 	if cid := smokeCommentID(); cid != "" {
 		assert.Contains(t, text, cid, "should contain the known comment ID")
 	}
+	assert.NotContains(t, text, "@user(",
+		"comment body should resolve user mentions to display names, not leave raw @user(accountId)")
 }
 
 func TestSmoke_ReadFocusedComment(t *testing.T) {
@@ -946,12 +948,15 @@ func TestSmoke_Append_ReplaceSection(t *testing.T) {
 		"fixture page unexpectedly missing reference content — test cannot verify replace")
 
 	sentinel := fmt.Sprintf("Smoke replace_section sentinel %d", time.Now().UnixNano())
+	// Include the target heading at the top of the fragment to exercise the
+	// server-side strip — the merged body must still contain exactly one copy.
+	body := fmt.Sprintf("## %s\n\n%s", heading, sentinel)
 
 	text := callTool(t, env.session, "confluence_write", map[string]any{
 		"action": "append",
 		"items": []any{map[string]any{
 			"page_id":  pageID,
-			"body":     sentinel,
+			"body":     body,
 			"position": "replace_section",
 			"heading":  heading,
 		}},
@@ -968,6 +973,8 @@ func TestSmoke_Append_ReplaceSection(t *testing.T) {
 		"old content under section 27 should have been replaced")
 	assert.Contains(t, storage, "28. Additional Headings",
 		"next heading should survive — we must not cross the layout-cell boundary")
+	assert.Equal(t, 1, strings.Count(storage, heading),
+		"target heading should appear exactly once — fragment-leading duplicate should be stripped")
 }
 
 // TestSmoke_Append_StorageMacro exercises appending a macro via format=storage.

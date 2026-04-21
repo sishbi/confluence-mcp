@@ -3,6 +3,7 @@ package confluencemcp
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -17,6 +18,13 @@ func spliceReplaceSection(body, fragment, heading string) (SpliceResult, error) 
 	if err != nil {
 		return SpliceResult{}, err
 	}
+
+	// Callers frequently emit a fragment that begins with the section heading
+	// (e.g. "## Data scrubbing\n\n..."), which would produce a duplicated
+	// heading after the splice since the target heading is preserved. Strip a
+	// leading heading whose text matches the target so the fragment body-only
+	// convention is forgiving.
+	fragment = stripLeadingHeading(fragment, heading)
 
 	// The replaced region starts at match.headingEndOff (just after </hN>) and
 	// extends up to the stop offset. We also collect top-level element names
@@ -113,6 +121,35 @@ func spliceReplaceSection(body, fragment, heading string) (SpliceResult, error) 
 			ReplacedElementSummary: summariseTags(replacedTags),
 		},
 	}, nil
+}
+
+// reLeadingHeading matches an optional leading whitespace run followed by a
+// single <hN>...</hN> element and any trailing whitespace. Go's RE2 has no
+// backreferences; the closing level is checked post-match rather than in the
+// pattern. The inner content is captured for comparison against the target
+// heading text.
+var reLeadingHeading = regexp.MustCompile(`(?s)\A\s*<h([1-6])[^>]*>(.*?)</h([1-6])>\s*`)
+
+// stripLeadingHeading removes a leading <hN>...</hN> element from fragment
+// when its text content (normalized) matches target. Returns fragment
+// unchanged if the fragment does not start with a heading or the text
+// doesn't match. Level is ignored so a fragment that prefixes a different
+// level than the target is still cleaned.
+func stripLeadingHeading(fragment, target string) string {
+	loc := reLeadingHeading.FindStringSubmatchIndex(fragment)
+	if loc == nil {
+		return fragment
+	}
+	openLevel := fragment[loc[2]:loc[3]]
+	closeLevel := fragment[loc[6]:loc[7]]
+	if openLevel != closeLevel {
+		return fragment
+	}
+	inner := fragment[loc[4]:loc[5]]
+	if normalizeHeading(extractText(inner)) != normalizeHeading(target) {
+		return fragment
+	}
+	return fragment[loc[1]:]
 }
 
 // summariseTags turns a document-order list of element local names into a

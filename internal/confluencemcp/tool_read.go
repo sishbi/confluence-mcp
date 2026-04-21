@@ -332,7 +332,7 @@ func (h *handlers) readByURL(ctx context.Context, args ReadArgs) (*mcp.CallToolR
 	if err != nil {
 		return textResult(fmt.Sprintf("error fetching comment %s: %v", info.commentID, err), true), nil, nil
 	}
-	commentMD := mdconv.ToMarkdown(comment.Body.Storage.Value)
+	commentMD := h.commentRenderer(ctx, info.pageID)(comment.Body.Storage.Value)
 
 	// Check if page is cached.
 	_, cached := h.cache.get(info.pageID)
@@ -478,8 +478,9 @@ func (h *handlers) readComments(ctx context.Context, args ReadArgs) (*mcp.CallTo
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "**Comments on page %s:**\n\n", args.PageID)
+	render := h.commentRenderer(ctx, args.PageID)
 	for _, c := range comments {
-		body := mdconv.ToMarkdown(c.Body.Storage.Value)
+		body := render(c.Body.Storage.Value)
 		fmt.Fprintf(&sb, "---\n**Comment ID:** %s\n\n%s\n\n", c.ID, body)
 	}
 
