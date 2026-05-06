@@ -50,14 +50,6 @@ A bidirectional converter lives in `internal/mdconv` — it is used for every re
 - **Anchors, sub/sup, strikethrough, `<u>`** — all round-trip
 - **Macro preservation** — unknown or opaque macros (`jira`, `details`, `toc`, `code`, etc.) are replaced with self-describing `<!-- macro:mN -->` sentinels in the Markdown; the original XML is restored verbatim on write
 
-### Operational
-
-- **Structured logging** — slog JSON to stderr with request/retry/error detail in the HTTP client, tool-call middleware, and handler-level page/cache/URL events
-- **`-log-level` flag** — `debug`, `info`, `warn`, `error`
-- **Install script** — `scripts/install-mcp.sh` (re)registers the server with Claude Code via a wrapper that tees logs to `/tmp/confluence-mcp.log` (override with `CONFLUENCE_MCP_LOG_FILE`); `--debug` switches level, `--remove` uninstalls
-- **Anonymise CLI** — `cmd/anonymise` turns a Chrome-saved Confluence page into a deterministic test fixture by replacing text and attribute values while preserving structure
-- **Smoke-test harness** — `scripts/smoke_test.go` (build tag `smoke`) runs end-to-end checks against live Confluence; excluded from normal `task test`
-
 ## Quick start
 
 ### 1. Get an API token
@@ -109,14 +101,6 @@ Or use the install script above, which wraps the binary so stderr logs land in a
 ### 5. Verify
 
 Ask Claude: "List my Confluence spaces"
-
-## Running smoke tests
-
-```bash
-go test -tags smoke -v -timeout 120s ./scripts/
-```
-
-Requires the three `CONFLUENCE_*` env vars. The suite reads a known page, round-trips an edit, verifies comments/labels, and restores the original page body via `t.Cleanup`.
 
 ## Releasing
 
