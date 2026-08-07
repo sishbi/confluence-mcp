@@ -49,13 +49,14 @@ for arg in "$@"; do
     esac
 done
 
-# Native and brew share the server name (confluence-mcp) — switching modes
+# Native and brew share the server name (confluence) — switching modes
 # re-registers cleanly because the install step removes any prior entry first.
+# Docker registers separately as confluence-mcp-docker so both can coexist.
 if [[ "$MODE" == "docker" ]]; then
     SERVER_NAME="confluence-mcp-docker"
     LAUNCHER="$DOCKER_RUN"
 else
-    SERVER_NAME="confluence-mcp"
+    SERVER_NAME="confluence"
     LAUNCHER="$WRAPPER"
 fi
 
