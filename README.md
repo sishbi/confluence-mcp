@@ -93,7 +93,7 @@ export CONFLUENCE_API_TOKEN="your-api-token"
 ### 4. Add to Claude Code
 
 ```bash
-claude mcp add confluence-mcp -- confluence-mcp
+claude mcp add confluence -- confluence-mcp
 ```
 
 Or use the install script above, which wraps the binary so stderr logs land in a file you can `tail -f`.
