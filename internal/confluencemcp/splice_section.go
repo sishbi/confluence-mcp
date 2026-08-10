@@ -17,11 +17,16 @@ var errStopWalk = errors.New("stop walk")
 //
 // The stop conditions, evaluated in document order after the heading's
 // closing tag:
-//   - A heading start at level <= match.level, at the same layoutCellDepth
-//     and macroDepth as the target heading — stop at that heading's start.
+//   - A heading start at level <= match.level, at the same layoutCellDepth,
+//     macroDepth, and unsafeContainerDepth as the target heading — stop at
+//     that heading's start. The unsafeContainerDepth check matters because
+//     the unsafeContainerTags (see splice_walker.go) don't move
+//     layoutCellDepth or macroDepth, so a heading buried in one of them
+//     would otherwise be taken as the stop.
 //   - The close of the containing ac:layout-cell, when the target heading is
 //     itself inside a layout-cell (targetLayoutDepth > 0) — stop at the close
-//     tag's start.
+//     tag's start. layoutCellDepth is a per-tag LIFO counter, so the first
+//     close at the target's depth is the target's own cell.
 //   - Otherwise, the stop offset defaults to len(body) (no-layout case).
 //
 // Along the way, findSectionEnd also collects the element local-names of the
@@ -31,6 +36,7 @@ var errStopWalk = errors.New("stop walk")
 func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags []string, err error) {
 	targetLayoutDepth := match.layoutCellDepth
 	targetMacroDepth := match.macroDepth
+	targetUnsafeContainerDepth := match.unsafeContainerDepth
 	targetLevel := match.level
 	var topLevelStarted bool
 	stopOff = len(body) // default: end of body (no-layout case)
@@ -51,7 +57,8 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 		if ev.kind == eventHeadingStart &&
 			ev.level <= targetLevel &&
 			ev.layoutCellDepth == targetLayoutDepth &&
-			ev.macroDepth == targetMacroDepth {
+			ev.macroDepth == targetMacroDepth &&
+			ev.unsafeContainerDepth == targetUnsafeContainerDepth {
 			stopOff = ev.tokStart
 			return errStopWalk
 		}
@@ -67,17 +74,14 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 		// (i.e. a sibling of the target heading), once per element.
 		switch ev.kind {
 		case eventStart, eventHeadingStart:
-			if !topLevelStarted &&
-				ev.layoutCellDepth == targetLayoutDepth &&
-				ev.macroDepth == targetMacroDepth {
+			if !topLevelStarted && isTopLevelSibling(ev, targetLayoutDepth, targetMacroDepth, targetUnsafeContainerDepth) {
 				replacedTags = append(replacedTags, ev.name)
 				topLevelStarted = true
 				topLevelOpenTag = ev.name
 			}
 		case eventEnd, eventHeadingEnd:
 			if topLevelStarted && ev.name == topLevelOpenTag &&
-				ev.layoutCellDepth == targetLayoutDepth &&
-				ev.macroDepth == targetMacroDepth {
+				isTopLevelSibling(ev, targetLayoutDepth, targetMacroDepth, targetUnsafeContainerDepth) {
 				topLevelStarted = false
 				topLevelOpenTag = ""
 			}
@@ -89,6 +93,30 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 	}
 
 	return stopOff, replacedTags, nil
+}
+
+// isTopLevelSibling reports whether ev is a direct sibling of the target
+// heading for the purpose of the replaced-element summary — i.e. an element
+// at the target's layoutCellDepth and macroDepth, and at the target's
+// unsafeContainerDepth.
+//
+// A top-level sibling that is itself one of the unsafeContainerTags (e.g. a
+// <blockquote> or <ac:adf-extension> sibling of the heading) is a special
+// case: the walker increments unsafeContainerDepth before reporting a start
+// event and reports it pre-decrement on the matching close event (see
+// splice_walker.go), so that element's own start/end events are seen one
+// level deeper than its siblings' — not at targetUnsafeContainerDepth like
+// every other top-level sibling, but at targetUnsafeContainerDepth+1. Without
+// this second branch such a sibling (and its whole subtree) would be
+// silently skipped rather than counted.
+func isTopLevelSibling(ev walkEvent, targetLayoutDepth, targetMacroDepth, targetUnsafeContainerDepth int) bool {
+	if ev.layoutCellDepth != targetLayoutDepth || ev.macroDepth != targetMacroDepth {
+		return false
+	}
+	if ev.unsafeContainerDepth == targetUnsafeContainerDepth {
+		return true
+	}
+	return unsafeContainerTags[ev.name] && ev.unsafeContainerDepth == targetUnsafeContainerDepth+1
 }
 
 // sectionStopAnchor derives the container name and an anchor phrase
@@ -105,10 +133,9 @@ func sectionStopAnchor(body string, stopOff int, targetLayoutDepth int) (anchor,
 		container = "ac:layout-cell"
 	}
 	anchor = "end of " + container
-	// If we stopped at a heading rather than a container close, report that.
-	// We can detect this by re-walking the original body to find the element at
-	// stopOff — but a simpler heuristic is: if stopOff < end of body, it's a
-	// heading stop.
+	// A heading stop leaves stopOff short of the body's end and not pointing
+	// at the layout-cell's own closing tag; a container-close stop points
+	// exactly at "</ac:layout-cell>" (or, with no layout, never stops short).
 	if stopOff < len(body) && (targetLayoutDepth == 0 || !strings.HasPrefix(body[stopOff:], "</ac:layout-cell>")) {
 		anchor = "before next heading at same or higher level"
 	}

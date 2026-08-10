@@ -33,7 +33,8 @@ type SpliceOptions struct {
 // was removed. Fields are populated per mode; unused fields are left zero.
 // JSON tags match the preview shape documented in the append design doc.
 type BoundaryInfo struct {
-	// InsertAnchor is populated for ModeEnd and ModeAfterHeading.
+	// InsertAnchor is populated for ModeEnd, ModeAfterHeading, and
+	// ModeEndOfSection.
 	InsertAnchor string `json:"insert_anchor,omitempty"`
 	// StartAnchor and EndAnchor describe the replaced range for ModeReplaceSection.
 	StartAnchor string `json:"start_anchor,omitempty"`
