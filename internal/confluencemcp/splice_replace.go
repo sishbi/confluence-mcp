@@ -25,10 +25,6 @@ func spliceReplaceSection(body, fragment, heading string) (SpliceResult, error) 
 	// extends up to the stop offset. findSectionEnd also collects top-level
 	// element names seen between the heading end and the stop, for the
 	// replaced-element summary.
-
-	targetLayoutDepth := match.layoutCellDepth
-	targetLevel := match.level
-
 	stopOff, replacedTags, err := findSectionEnd(body, match)
 	if err != nil {
 		return SpliceResult{}, err
@@ -37,8 +33,8 @@ func spliceReplaceSection(body, fragment, heading string) (SpliceResult, error) 
 	replacedByteCount := stopOff - match.headingEndOff
 	merged := body[:match.headingEndOff] + fragment + body[stopOff:]
 
-	startAnchor := fmt.Sprintf("after </h%d> %q", targetLevel, heading)
-	endAnchor, container := sectionStopAnchor(body, stopOff, targetLayoutDepth)
+	startAnchor := fmt.Sprintf("after </h%d> %q", match.level, heading)
+	endAnchor, container := sectionStopAnchor(body, stopOff, match.layoutCellDepth)
 
 	return SpliceResult{
 		Merged: merged,

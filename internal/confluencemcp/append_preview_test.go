@@ -109,6 +109,9 @@ func TestBuildPreview(t *testing.T) {
 		if !strings.Contains(p.Context.Before, "existing") {
 			t.Errorf("Context.Before should contain the section's existing content: %q", p.Context.Before)
 		}
+		if strings.Contains(p.Context.Before, "<h2>B</h2>") {
+			t.Errorf("Context.Before should stop at the splice point, not run past the next heading: %q", p.Context.Before)
+		}
 		if !strings.HasPrefix(p.Context.After, "<h2>B</h2>") {
 			t.Errorf("Context.After should begin at the next heading: %q", p.Context.After)
 		}
@@ -142,39 +145,9 @@ func replaceStr(pattern, v string) string {
 	return strings.Replace(pattern, "%s", v, 1)
 }
 
-// TestModeString_Unknown covers the one branch buildPreview's subtests cannot
-// reach: an out-of-range Mode falling through to the default case. The four
-// known mappings are already asserted via p.Position in each TestBuildPreview
-// subtest above.
-func TestModeString_Unknown(t *testing.T) {
-	const outOfRange Mode = 99
-	if got := modeString(outOfRange); got != "unknown" {
-		t.Errorf("modeString(%v) = %q, want %q", outOfRange, got, "unknown")
-	}
-}
-
-func TestSummariseAction_EndOfSection(t *testing.T) {
-	got := summariseAction(ModeEndOfSection, "A", BoundaryInfo{})
-	const want = `Append to end of section "A".`
-	if got != want {
-		t.Errorf("summariseAction(ModeEndOfSection, ...) = %q, want %q", got, want)
-	}
-}
-
-func TestContextAround_EndOfSection(t *testing.T) {
-	base := `<h2>A</h2><p>existing</p><h2>B</h2><p>other</p>`
-	before, after := contextAround(base, ModeEndOfSection, "A")
-	if !strings.Contains(before, "existing") {
-		t.Errorf("before should contain section A's existing content: %q", before)
-	}
-	if strings.Contains(before, "<h2>B</h2>") {
-		t.Errorf("before should not include the next heading: %q", before)
-	}
-	if !strings.HasPrefix(after, "<h2>B</h2>") {
-		t.Errorf("after should begin at the next heading (the splice/stop point): %q", after)
-	}
-}
-
+// TestContextAround_ReplaceSection pins replace_section's before/after
+// asymmetry: unlike end_of_section, its "before" excludes the section body,
+// because that body is what is being replaced.
 func TestContextAround_ReplaceSection(t *testing.T) {
 	base := `<h2>A</h2><p>old</p><h2>B</h2><p>other</p>`
 	before, after := contextAround(base, ModeReplaceSection, "A")

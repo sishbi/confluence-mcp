@@ -58,9 +58,10 @@ func TestAppend_End_Markdown(t *testing.T) {
 	assert.Equal(t, 8, version["number"])
 }
 
-// TestAppend_DryRun table-drives the dry-run preview across positions. The
-// Task 4 incident symptom was `"position": "unknown"` alongside an EMPTY
-// action_summary, so every case pins both fields together, not just position.
+// TestAppend_DryRun table-drives the dry-run preview across positions. A
+// position missing from the preview switch surfaces as `"position": "unknown"`
+// alongside an EMPTY action_summary, so every case pins both fields together
+// rather than position alone.
 func TestAppend_DryRun(t *testing.T) {
 	const endOfSectionBody = `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>` +
 		`<h2>Section A</h2><p>existing</p><h2>Section B</h2><p>other</p>` +
