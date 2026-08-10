@@ -150,13 +150,78 @@ func TestAppend_RequiredFields(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, strings.ToLower(err.Error()), "heading")
 	})
+	t.Run("heading required for end_of_section", func(t *testing.T) {
+		_, err := h.writeAppend(context.Background(), WriteItem{
+			PageID: "p1", Body: "x", Position: "end_of_section",
+		}, false)
+		require.Error(t, err)
+		assert.Contains(t, strings.ToLower(err.Error()), "heading")
+	})
 	t.Run("unknown position rejected", func(t *testing.T) {
 		_, err := h.writeAppend(context.Background(), WriteItem{
 			PageID: "p1", Body: "x", Position: "fly_away",
 		}, false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unknown position")
+		// An agent that guesses wrong should be told end_of_section exists.
+		assert.Contains(t, err.Error(), "end_of_section")
 	})
+}
+
+func TestParseMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		position string
+		want     Mode
+	}{
+		{"empty defaults to end", "", ModeEnd},
+		{"end", "end", ModeEnd},
+		{"after_heading", "after_heading", ModeAfterHeading},
+		{"replace_section", "replace_section", ModeReplaceSection},
+		{"end_of_section", "end_of_section", ModeEndOfSection},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseMode(tt.position)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestAppend_EndOfSection(t *testing.T) {
+	body := `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>` +
+		`<h2>Section A</h2><p>existing</p><h2>Section B</h2><p>other</p>` +
+		`</ac:layout-cell></ac:layout-section></ac:layout>`
+	var captured map[string]any
+	h := &handlers{client: newAppendPageMock(body, &captured)}
+
+	msg, err := h.writeAppend(context.Background(), WriteItem{
+		PageID:   "p1",
+		Body:     "New paragraph.",
+		Position: "end_of_section",
+		Heading:  "Section A",
+	}, false)
+	require.NoError(t, err)
+	assert.Contains(t, msg, "Appended to")
+
+	updatedBody := captured["body"].(map[string]any)
+	storage := updatedBody["storage"].(map[string]any)
+	value := storage["value"].(string)
+
+	// Regression case for the incident this mode fixes: the new fragment must
+	// land at the END of Section A (after its own paragraph), and Section B's
+	// paragraph must stay attached to Section B rather than being pushed below
+	// the new content.
+	require.Contains(t, value, "New paragraph.")
+	idxExisting := strings.Index(value, "existing")
+	idxNew := strings.Index(value, "New paragraph.")
+	idxSectionB := strings.Index(value, "Section B")
+	idxOther := strings.Index(value, "other")
+	require.True(t, idxExisting >= 0 && idxNew >= 0 && idxSectionB >= 0 && idxOther >= 0)
+	assert.True(t, idxExisting < idxNew, "existing paragraph should precede the new fragment")
+	assert.True(t, idxNew < idxSectionB, "new fragment should precede Section B's heading")
+	assert.True(t, idxSectionB < idxOther, "Section B heading should precede its own paragraph")
 }
 
 func TestAppend_VersionMismatch(t *testing.T) {

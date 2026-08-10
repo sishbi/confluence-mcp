@@ -24,7 +24,7 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 	if err != nil {
 		return "", err
 	}
-	if (mode == ModeAfterHeading || mode == ModeReplaceSection) && item.Heading == "" {
+	if requiresHeading(mode) && item.Heading == "" {
 		return "", fmt.Errorf("heading is required for position %q", item.Position)
 	}
 
@@ -158,10 +158,24 @@ func parseMode(position string) (Mode, error) {
 		return ModeEnd, nil
 	case "after_heading":
 		return ModeAfterHeading, nil
+	case "end_of_section":
+		return ModeEndOfSection, nil
 	case "replace_section":
 		return ModeReplaceSection, nil
 	default:
-		return 0, fmt.Errorf("unknown position %q — use: end, after_heading, replace_section", position)
+		return 0, fmt.Errorf("unknown position %q — use: end, after_heading, end_of_section, replace_section", position)
+	}
+}
+
+// requiresHeading reports whether mode needs a target heading to operate on.
+// Only ModeEnd is heading-free; the other three all locate a named heading
+// before doing anything else.
+func requiresHeading(mode Mode) bool {
+	switch mode {
+	case ModeAfterHeading, ModeReplaceSection, ModeEndOfSection:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -30,8 +30,10 @@ var errStopWalk = errors.New("stop walk")
 //   - Otherwise, the stop offset defaults to len(body) (no-layout case).
 //
 // Along the way, findSectionEnd also collects the element local-names of the
-// top-level siblings between the heading and the stop offset (i.e. elements
-// at exactly the target's layoutCellDepth & macroDepth), for the
+// top-level siblings between the heading and the stop offset — i.e. elements
+// that isTopLevelSibling considers direct siblings of the target heading
+// (layoutCellDepth, macroDepth, and unsafeContainerDepth all in step with the
+// target; see that function for the full three-dimensional rule) — for the
 // replaced-element summary used by replace-section.
 func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags []string, err error) {
 	targetLayoutDepth := match.layoutCellDepth
@@ -41,10 +43,9 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 	var topLevelStarted bool
 	stopOff = len(body) // default: end of body (no-layout case)
 	// topLevelStarted tracks whether we've entered a top-level element. When we
-	// see a start-element whose reported depth (layoutCellDepth, macroDepth)
-	// equals the target's, and we're not already inside one, it's a new
-	// top-level element. We append its name once, then ignore further starts
-	// until we leave it.
+	// see a start-element that isTopLevelSibling reports as a sibling of
+	// match, and we're not already inside one, it's a new top-level element.
+	// We append its name once, then ignore further starts until we leave it.
 	topLevelOpenTag := ""
 
 	walkErr := walkStorage(body, func(ev walkEvent) error {
@@ -70,18 +71,18 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 		}
 
 		// Track top-level replaced elements for the summary. We count each
-		// element that starts at exactly targetLayoutDepth & targetMacroDepth
-		// (i.e. a sibling of the target heading), once per element.
+		// element isTopLevelSibling reports as a direct sibling of the target
+		// heading, once per element.
 		switch ev.kind {
 		case eventStart, eventHeadingStart:
-			if !topLevelStarted && isTopLevelSibling(ev, targetLayoutDepth, targetMacroDepth, targetUnsafeContainerDepth) {
+			if !topLevelStarted && isTopLevelSibling(ev, match) {
 				replacedTags = append(replacedTags, ev.name)
 				topLevelStarted = true
 				topLevelOpenTag = ev.name
 			}
 		case eventEnd, eventHeadingEnd:
 			if topLevelStarted && ev.name == topLevelOpenTag &&
-				isTopLevelSibling(ev, targetLayoutDepth, targetMacroDepth, targetUnsafeContainerDepth) {
+				isTopLevelSibling(ev, match) {
 				topLevelStarted = false
 				topLevelOpenTag = ""
 			}
@@ -95,28 +96,31 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 	return stopOff, replacedTags, nil
 }
 
-// isTopLevelSibling reports whether ev is a direct sibling of the target
-// heading for the purpose of the replaced-element summary — i.e. an element
-// at the target's layoutCellDepth and macroDepth, and at the target's
-// unsafeContainerDepth.
+// isTopLevelSibling reports whether ev is a direct sibling of match's heading
+// for the purpose of the replaced-element summary — i.e. an element at
+// match's layoutCellDepth and macroDepth, and at match's
+// unsafeContainerDepth. match's three depth fields travel together (all
+// three are read off the same heading event in locateHeading), so they are
+// taken as a single struct rather than three same-typed int params — passing
+// them individually left the two call sites free to transpose them silently.
 //
 // A top-level sibling that is itself one of the unsafeContainerTags (e.g. a
 // <blockquote> or <ac:adf-extension> sibling of the heading) is a special
 // case: the walker increments unsafeContainerDepth before reporting a start
 // event and reports it pre-decrement on the matching close event (see
 // splice_walker.go), so that element's own start/end events are seen one
-// level deeper than its siblings' — not at targetUnsafeContainerDepth like
-// every other top-level sibling, but at targetUnsafeContainerDepth+1. Without
+// level deeper than its siblings' — not at match.unsafeContainerDepth like
+// every other top-level sibling, but at match.unsafeContainerDepth+1. Without
 // this second branch such a sibling (and its whole subtree) would be
 // silently skipped rather than counted.
-func isTopLevelSibling(ev walkEvent, targetLayoutDepth, targetMacroDepth, targetUnsafeContainerDepth int) bool {
-	if ev.layoutCellDepth != targetLayoutDepth || ev.macroDepth != targetMacroDepth {
+func isTopLevelSibling(ev walkEvent, match headingMatch) bool {
+	if ev.layoutCellDepth != match.layoutCellDepth || ev.macroDepth != match.macroDepth {
 		return false
 	}
-	if ev.unsafeContainerDepth == targetUnsafeContainerDepth {
+	if ev.unsafeContainerDepth == match.unsafeContainerDepth {
 		return true
 	}
-	return unsafeContainerTags[ev.name] && ev.unsafeContainerDepth == targetUnsafeContainerDepth+1
+	return unsafeContainerTags[ev.name] && ev.unsafeContainerDepth == match.unsafeContainerDepth+1
 }
 
 // sectionStopAnchor derives the container name and an anchor phrase
