@@ -3,7 +3,6 @@ package confluencemcp
 import (
 	"fmt"
 	"regexp"
-	"strings"
 )
 
 // spliceReplaceSection replaces the content under the target heading up to
@@ -38,19 +37,8 @@ func spliceReplaceSection(body, fragment, heading string) (SpliceResult, error) 
 	replacedByteCount := stopOff - match.headingEndOff
 	merged := body[:match.headingEndOff] + fragment + body[stopOff:]
 
-	container := "document root"
-	if targetLayoutDepth > 0 {
-		container = "ac:layout-cell"
-	}
 	startAnchor := fmt.Sprintf("after </h%d> %q", targetLevel, heading)
-	endAnchor := "end of " + container
-	// If we stopped at a heading rather than a container close, report that.
-	// We can detect this by re-walking the original body to find the element at
-	// stopOff — but a simpler heuristic is: if stopOff < end of body, it's a
-	// heading stop.
-	if stopOff < len(body) && (targetLayoutDepth == 0 || !strings.HasPrefix(body[stopOff:], "</ac:layout-cell>")) {
-		endAnchor = "before next heading at same or higher level"
-	}
+	endAnchor, container := sectionStopAnchor(body, stopOff, targetLayoutDepth)
 
 	return SpliceResult{
 		Merged: merged,

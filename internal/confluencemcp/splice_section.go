@@ -3,6 +3,7 @@ package confluencemcp
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // errStopWalk is a sentinel used internally to stop the walker once we've
@@ -31,15 +32,13 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 	targetLayoutDepth := match.layoutCellDepth
 	targetMacroDepth := match.macroDepth
 	targetLevel := match.level
-	var (
-		topLevelStarted bool
-	)
+	var topLevelStarted bool
 	stopOff = len(body) // default: end of body (no-layout case)
 	// topLevelStarted tracks whether we've entered a top-level element. When we
 	// see a start-element whose reported depth (layoutCellDepth, macroDepth)
 	// equals the target's, and we're not already inside one, it's a new
-	// top-level element. We increment count then ignore further starts until
-	// we leave it.
+	// top-level element. We append its name once, then ignore further starts
+	// until we leave it.
 	topLevelOpenTag := ""
 
 	walkErr := walkStorage(body, func(ev walkEvent) error {
@@ -90,4 +89,62 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 	}
 
 	return stopOff, replacedTags, nil
+}
+
+// sectionStopAnchor derives the container name and an anchor phrase
+// describing where a section-scoped splice (replace-section or
+// end-of-section) stopped, per the shared findSectionEnd heuristic: if the
+// stop offset lands on a heading start rather than the close of the
+// containing ac:layout-cell or the end of the body, describe it as "before
+// next heading at same or higher level"; otherwise describe it as the end of
+// the container. Shared by spliceReplaceSection and spliceEndOfSection so the
+// phrasing stays identical across both modes.
+func sectionStopAnchor(body string, stopOff int, targetLayoutDepth int) (anchor, container string) {
+	container = "document root"
+	if targetLayoutDepth > 0 {
+		container = "ac:layout-cell"
+	}
+	anchor = "end of " + container
+	// If we stopped at a heading rather than a container close, report that.
+	// We can detect this by re-walking the original body to find the element at
+	// stopOff — but a simpler heuristic is: if stopOff < end of body, it's a
+	// heading stop.
+	if stopOff < len(body) && (targetLayoutDepth == 0 || !strings.HasPrefix(body[stopOff:], "</ac:layout-cell>")) {
+		anchor = "before next heading at same or higher level"
+	}
+	return anchor, container
+}
+
+// spliceEndOfSection inserts fragment at the END of the named section: after
+// the section's existing content, before the next same-or-higher-level
+// heading or the close of the containing layout-cell.
+//
+// Unlike spliceReplaceSection, the target heading itself is not part of the
+// inserted region and is never touched — the fragment is inserted whole,
+// including any leading heading it may carry. A fragment beginning with a
+// heading is the primary use case here (adding a new sibling or child
+// section), so — deliberately, unlike spliceReplaceSection — stripLeadingHeading
+// is never called: stripping would silently discard the new section's title.
+func spliceEndOfSection(body, fragment, heading string) (SpliceResult, error) {
+	match, err := locateHeading(body, heading)
+	if err != nil {
+		return SpliceResult{}, err
+	}
+
+	stopOff, _, err := findSectionEnd(body, match)
+	if err != nil {
+		return SpliceResult{}, err
+	}
+
+	merged := body[:stopOff] + fragment + body[stopOff:]
+
+	insertAnchor, container := sectionStopAnchor(body, stopOff, match.layoutCellDepth)
+
+	return SpliceResult{
+		Merged: merged,
+		Boundary: BoundaryInfo{
+			InsertAnchor: insertAnchor,
+			Container:    container,
+		},
+	}, nil
 }

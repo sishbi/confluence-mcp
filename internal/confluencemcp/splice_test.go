@@ -44,6 +44,19 @@ func TestSplice_DispatchesByMode(t *testing.T) {
 		}
 	})
 
+	t.Run("ModeEndOfSection", func(t *testing.T) {
+		res, err := Splice(body, fragment, SpliceOptions{Mode: ModeEndOfSection, Heading: "Section A"})
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if res.Boundary.InsertAnchor == "" {
+			t.Errorf("InsertAnchor empty — ModeEndOfSection did not run")
+		}
+		if res.Boundary.StartAnchor != "" {
+			t.Errorf("StartAnchor should be empty for ModeEndOfSection")
+		}
+	})
+
 	t.Run("unknown mode returns ErrNotImplemented", func(t *testing.T) {
 		_, err := Splice(body, fragment, SpliceOptions{Mode: Mode(99)})
 		if !errors.Is(err, ErrNotImplemented) {
@@ -484,6 +497,124 @@ func TestSplice_ReplaceSection(t *testing.T) {
 		want := fmt.Sprintf(cell, `<h2>A</h2><h3>Details</h3><p>new</p><h2>B</h2>`)
 		if res.Merged != want {
 			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
+}
+
+func TestSplice_EndOfSection(t *testing.T) {
+	const cell = `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>%s</ac:layout-cell></ac:layout-section></ac:layout>`
+
+	t.Run("regression: new sibling section lands between, first section keeps its paragraph", func(t *testing.T) {
+		body := `<h2>Section 6.6</h2><p>paragraph for 6.6</p><h2>Section 6.8</h2><p>other</p>`
+		fragment := `<h2>Section 6.7</h2><p>new content</p>`
+		res, err := spliceEndOfSection(body, fragment, "Section 6.6")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := `<h2>Section 6.6</h2><p>paragraph for 6.6</p><h2>Section 6.7</h2><p>new content</p><h2>Section 6.8</h2><p>other</p>`
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+		if res.Boundary.InsertAnchor != "before next heading at same or higher level" {
+			t.Errorf("got InsertAnchor %q, want %q", res.Boundary.InsertAnchor, "before next heading at same or higher level")
+		}
+	})
+
+	t.Run("appends to section that already has content", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>A</h2><p>existing</p><h2>B</h2>`)
+		fragment := `<p>new</p>`
+		res, err := spliceEndOfSection(body, fragment, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := fmt.Sprintf(cell, `<h2>A</h2><p>existing</p><p>new</p><h2>B</h2>`)
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
+
+	t.Run("last section on the page with no layout: inserts at end of body", func(t *testing.T) {
+		body := `<h2>A</h2><p>only</p>`
+		fragment := `<p>new</p>`
+		res, err := spliceEndOfSection(body, fragment, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := `<h2>A</h2><p>only</p><p>new</p>`
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+		if res.Boundary.InsertAnchor != "end of document root" {
+			t.Errorf("got InsertAnchor %q, want %q", res.Boundary.InsertAnchor, "end of document root")
+		}
+	})
+
+	t.Run("section ending at ac:layout-cell close: inserts before the close, never crosses it", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>A</h2><p>old</p>`)
+		fragment := `<p>new</p>`
+		res, err := spliceEndOfSection(body, fragment, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := fmt.Sprintf(cell, `<h2>A</h2><p>old</p><p>new</p>`)
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+		if res.Boundary.CrossesLayout {
+			t.Errorf("CrossesLayout should be false")
+		}
+		if res.Boundary.InsertAnchor != "end of ac:layout-cell" {
+			t.Errorf("got InsertAnchor %q, want %q", res.Boundary.InsertAnchor, "end of ac:layout-cell")
+		}
+	})
+
+	t.Run("subsection present: stop is the next h2, fragment lands after the h3's content", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>A</h2><p>p1</p><h3>sub</h3><p>p2</p><h2>B</h2>`)
+		fragment := `<p>new</p>`
+		res, err := spliceEndOfSection(body, fragment, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := fmt.Sprintf(cell, `<h2>A</h2><p>p1</p><h3>sub</h3><p>p2</p><p>new</p><h2>B</h2>`)
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
+
+	t.Run("fragment beginning with a heading matching the target text is preserved, not stripped", func(t *testing.T) {
+		body := `<h2>Data scrubbing</h2><p>old</p><h2>B</h2>`
+		fragment := `<h2>Data scrubbing</h2><p>new</p>`
+		res, err := spliceEndOfSection(body, fragment, "Data scrubbing")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := `<h2>Data scrubbing</h2><p>old</p><h2>Data scrubbing</h2><p>new</p><h2>B</h2>`
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
+
+	t.Run("heading not found returns ErrHeadingNotFound", func(t *testing.T) {
+		body := `<h2>A</h2>`
+		_, err := spliceEndOfSection(body, `<p>x</p>`, "Missing")
+		if !errors.Is(err, ErrHeadingNotFound) {
+			t.Fatalf("got %v, want ErrHeadingNotFound", err)
+		}
+	})
+
+	t.Run("ambiguous heading returns ErrAmbiguousHeading", func(t *testing.T) {
+		body := `<h2>Dup</h2><p>a</p><h2>Dup</h2>`
+		_, err := spliceEndOfSection(body, `<p>x</p>`, "Dup")
+		if !errors.Is(err, ErrAmbiguousHeading) {
+			t.Fatalf("got %v, want ErrAmbiguousHeading", err)
+		}
+	})
+
+	t.Run("heading in macro returns ErrHeadingInUnsafeContainer", func(t *testing.T) {
+		body := `<ac:structured-macro ac:name="expand"><ac:rich-text-body><h3>T</h3></ac:rich-text-body></ac:structured-macro>`
+		_, err := spliceEndOfSection(body, `<p>x</p>`, "T")
+		if !errors.Is(err, ErrHeadingInUnsafeContainer) {
+			t.Fatalf("got %v, want ErrHeadingInUnsafeContainer", err)
 		}
 	})
 }
