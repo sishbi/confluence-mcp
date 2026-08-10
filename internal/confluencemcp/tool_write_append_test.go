@@ -87,6 +87,37 @@ func TestAppend_End_DryRun(t *testing.T) {
 	assert.False(t, updateCalled, "dry_run must not call UpdatePage")
 }
 
+func TestAppend_EndOfSection_DryRun(t *testing.T) {
+	body := `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>` +
+		`<h2>Section A</h2><p>existing</p><h2>Section B</h2><p>other</p>` +
+		`</ac:layout-cell></ac:layout-section></ac:layout>`
+	getCalls := 0
+	updateCalled := false
+	h := &handlers{client: &mockClient{
+		GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
+			getCalls++
+			return &confluence.Page{
+				ID: id, Title: "Test", Version: confluence.PageVersion{Number: 1},
+				Body: confluence.PageBody{Storage: confluence.StorageBody{Value: body}},
+			}, nil
+		},
+		UpdatePageFn: func(_ context.Context, _ string, _ map[string]any) (*confluence.Page, error) {
+			updateCalled = true
+			return nil, nil
+		},
+	}}
+
+	msg, err := h.writeAppend(context.Background(), WriteItem{
+		PageID: "p1", Body: "dry note", Position: "end_of_section", Heading: "Section A",
+	}, true)
+	require.NoError(t, err)
+	assert.Contains(t, msg, "Would append")
+	assert.Contains(t, msg, `"position": "end_of_section"`)
+	assert.Contains(t, msg, `"input_body": "dry note"`)
+	assert.Equal(t, 1, getCalls)
+	assert.False(t, updateCalled, "dry_run must not call UpdatePage")
+}
+
 func TestAppend_StorageFormat_SkipsConversion(t *testing.T) {
 	var captured map[string]any
 	h := &handlers{client: newAppendPageMock(appendTestLayoutBody, &captured)}

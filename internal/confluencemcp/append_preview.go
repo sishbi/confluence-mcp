@@ -84,6 +84,8 @@ func modeString(m Mode) string {
 		return "after_heading"
 	case ModeReplaceSection:
 		return "replace_section"
+	case ModeEndOfSection:
+		return "end_of_section"
 	default:
 		return "unknown"
 	}
@@ -101,6 +103,8 @@ func summariseAction(mode Mode, heading string, b BoundaryInfo) string {
 			summary += " (replaces " + strings.Join(b.ReplacedElementSummary, ", ") + ")"
 		}
 		return summary + "."
+	case ModeEndOfSection:
+		return fmt.Sprintf("Append to end of section %q.", heading)
 	default:
 		return ""
 	}
@@ -108,8 +112,10 @@ func summariseAction(mode Mode, heading string, b BoundaryInfo) string {
 
 // contextAround returns a snippet of base-body context before and after the
 // splice point. Kept small (≤ maxContextChars each side) to bound the preview
-// size. For ModeReplaceSection, the "after" context begins at the stop-point
-// (not the heading), so the reviewer sees what survives the replace.
+// size. For ModeReplaceSection and ModeEndOfSection, the "after" context
+// begins at the section's stop-point (shared via findSectionEnd), so the
+// reviewer sees what survives a replace, or what immediately follows an
+// end-of-section insert.
 func contextAround(base string, mode Mode, heading string) (string, string) {
 	const maxContextChars = 400
 
@@ -137,20 +143,27 @@ func contextAround(base string, mode Mode, heading string) (string, string) {
 			return "", ""
 		}
 		return truncBefore(base[:match.headingEndOff]), truncAfter(base[match.headingEndOff:])
-	case ModeReplaceSection:
+	case ModeReplaceSection, ModeEndOfSection:
 		match, err := locateHeading(base, heading)
 		if err != nil {
 			return "", ""
 		}
-		// Recompute the stop offset for "after" context. We call
-		// spliceReplaceSection and use its result to tell us the end offset.
-		// This is a cheap second walk.
-		res, err := spliceReplaceSection(base, "", heading)
+		// Both modes share the section-stop rule in findSectionEnd; they only
+		// differ in what "before" shows — replace-section shows the tail up to
+		// the heading (everything after it is being replaced), end-of-section
+		// shows the tail up to the stop point (everything up to there is kept).
+		stopOff, _, err := findSectionEnd(base, match)
 		if err != nil {
-			return truncBefore(base[:match.headingEndOff]), ""
+			if mode == ModeReplaceSection {
+				return truncBefore(base[:match.headingEndOff]), ""
+			}
+			return "", ""
 		}
-		stopOff := match.headingEndOff + res.Boundary.ReplacedByteCount
-		return truncBefore(base[:match.headingEndOff]), truncAfter(base[stopOff:])
+		beforeOff := match.headingEndOff
+		if mode == ModeEndOfSection {
+			beforeOff = stopOff
+		}
+		return truncBefore(base[:beforeOff]), truncAfter(base[stopOff:])
 	default:
 		return "", ""
 	}

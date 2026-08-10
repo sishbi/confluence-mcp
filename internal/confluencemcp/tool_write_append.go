@@ -168,14 +168,16 @@ func parseMode(position string) (Mode, error) {
 }
 
 // requiresHeading reports whether mode needs a target heading to operate on.
-// Only ModeEnd is heading-free; the other three all locate a named heading
-// before doing anything else.
+// Only ModeEnd is heading-free; every other mode (including any added later)
+// defaults to requiring one — there is no `exhaustive` linter enabled in this
+// repo to catch a forgotten case here, so a future mode that omits itself
+// from an allow-list would silently skip the heading guard instead.
 func requiresHeading(mode Mode) bool {
 	switch mode {
-	case ModeAfterHeading, ModeReplaceSection, ModeEndOfSection:
-		return true
-	default:
+	case ModeEnd:
 		return false
+	default:
+		return true
 	}
 }
 

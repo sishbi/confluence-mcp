@@ -99,10 +99,7 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 // isTopLevelSibling reports whether ev is a direct sibling of match's heading
 // for the purpose of the replaced-element summary — i.e. an element at
 // match's layoutCellDepth and macroDepth, and at match's
-// unsafeContainerDepth. match's three depth fields travel together (all
-// three are read off the same heading event in locateHeading), so they are
-// taken as a single struct rather than three same-typed int params — passing
-// them individually left the two call sites free to transpose them silently.
+// unsafeContainerDepth.
 //
 // A top-level sibling that is itself one of the unsafeContainerTags (e.g. a
 // <blockquote> or <ac:adf-extension> sibling of the heading) is a special

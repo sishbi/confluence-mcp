@@ -88,6 +88,35 @@ func TestBuildPreview(t *testing.T) {
 		}
 	})
 
+	t.Run("ModeEndOfSection populates insert anchor and end-of-section context", func(t *testing.T) {
+		base := `<h2>A</h2><p>existing</p><h2>B</h2><p>other</p>`
+		fragment := `<p>new</p>`
+		res, err := Splice(base, fragment, SpliceOptions{Mode: ModeEndOfSection, Heading: "A"})
+		if err != nil {
+			t.Fatalf("splice: %v", err)
+		}
+		p := buildPreview("42", base, res.Merged, fragment, ModeEndOfSection, "A", res.Boundary, "new", "markdown")
+		if p.Position != "end_of_section" {
+			t.Errorf("Position = %q, want end_of_section", p.Position)
+		}
+		if p.ActionSummary == "" {
+			t.Errorf("ActionSummary empty")
+		}
+		if p.Context.Before == "" || p.Context.After == "" {
+			t.Errorf("Context.Before/After should both be populated")
+		}
+		const wantAnchor = "before next heading at same or higher level"
+		if p.Boundary.InsertAnchor != wantAnchor {
+			t.Errorf("InsertAnchor = %q, want %q", p.Boundary.InsertAnchor, wantAnchor)
+		}
+		if p.Boundary.ReplacedByteCount != 0 {
+			t.Errorf("ReplacedByteCount should be 0 for end_of_section, got %d", p.Boundary.ReplacedByteCount)
+		}
+		if p.Boundary.ReplacedElementSummary != nil {
+			t.Errorf("ReplacedElementSummary should be nil for end_of_section, got %v", p.Boundary.ReplacedElementSummary)
+		}
+	})
+
 	t.Run("DeltaBytes negative for shrinking replace", func(t *testing.T) {
 		base := `<h2>A</h2><p>aaaaaaaaaaaaaaaaaa</p>`
 		fragment := `<p>x</p>`
@@ -104,4 +133,50 @@ func TestBuildPreview(t *testing.T) {
 
 func replaceStr(pattern, v string) string {
 	return strings.Replace(pattern, "%s", v, 1)
+}
+
+func TestModeString(t *testing.T) {
+	tests := []struct {
+		name string
+		mode Mode
+		want string
+	}{
+		{"end", ModeEnd, "end"},
+		{"after_heading", ModeAfterHeading, "after_heading"},
+		{"replace_section", ModeReplaceSection, "replace_section"},
+		{"end_of_section", ModeEndOfSection, "end_of_section"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := modeString(tt.mode); got != tt.want {
+				t.Errorf("modeString(%v) = %q, want %q", tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSummariseAction_EndOfSectionDistinctFromAfterHeading(t *testing.T) {
+	afterHeading := summariseAction(ModeAfterHeading, "A", BoundaryInfo{})
+	endOfSection := summariseAction(ModeEndOfSection, "A", BoundaryInfo{})
+	if afterHeading == endOfSection {
+		t.Errorf("summariseAction should differ between after_heading and end_of_section, got %q for both", afterHeading)
+	}
+	const want = `Append to end of section "A".`
+	if endOfSection != want {
+		t.Errorf("summariseAction(ModeEndOfSection, ...) = %q, want %q", endOfSection, want)
+	}
+}
+
+func TestContextAround_EndOfSection(t *testing.T) {
+	base := `<h2>A</h2><p>existing</p><h2>B</h2><p>other</p>`
+	before, after := contextAround(base, ModeEndOfSection, "A")
+	if !strings.Contains(before, "existing") {
+		t.Errorf("before should contain section A's existing content: %q", before)
+	}
+	if strings.Contains(before, "<h2>B</h2>") {
+		t.Errorf("before should not include the next heading: %q", before)
+	}
+	if !strings.HasPrefix(after, "<h2>B</h2>") {
+		t.Errorf("after should begin at the next heading (the splice/stop point): %q", after)
+	}
 }
