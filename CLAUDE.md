@@ -74,8 +74,10 @@ scripts/                        install-mcp.sh, confluence-mcp-wrapper.sh, smoke
 
 ## Design & Implementation Plans
 
-Full design doc and 6 implementation plans are in `.claude/local-plans/`. Start with the master plan:
-`.claude/local-plans/2026-04-14-confluence-mcp-master-plan.md`
+Design docs and implementation plans live in `.ai-local-plans/`. That directory is untracked (it
+carries a `.gitignore` of `*`), so they are local working notes rather than repo content — a fresh
+clone has none. Where present, start with
+`.ai-local-plans/2026-04-14-confluence-mcp-master-plan.md`.
 
 ## Quality Gates
 
