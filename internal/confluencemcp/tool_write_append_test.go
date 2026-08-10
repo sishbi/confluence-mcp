@@ -3,6 +3,7 @@ package confluencemcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -57,65 +58,70 @@ func TestAppend_End_Markdown(t *testing.T) {
 	assert.Equal(t, 8, version["number"])
 }
 
-func TestAppend_End_DryRun(t *testing.T) {
-	getCalls := 0
-	updateCalled := false
-	h := &handlers{client: &mockClient{
-		GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
-			getCalls++
-			return &confluence.Page{
-				ID: id, Title: "Test", Version: confluence.PageVersion{Number: 1},
-				Body: confluence.PageBody{Storage: confluence.StorageBody{Value: appendTestLayoutBody}},
-			}, nil
-		},
-		UpdatePageFn: func(_ context.Context, _ string, _ map[string]any) (*confluence.Page, error) {
-			updateCalled = true
-			return nil, nil
-		},
-	}}
-
-	msg, err := h.writeAppend(context.Background(), WriteItem{
-		PageID: "p1", Body: "dry note", Position: "end",
-	}, true)
-	require.NoError(t, err)
-	assert.Contains(t, msg, "Would append")
-	// Preview JSON should be embedded.
-	assert.Contains(t, msg, `"position": "end"`)
-	assert.Contains(t, msg, `"input_body": "dry note"`)
-	assert.Contains(t, msg, `"storage_output":`)
-	assert.Equal(t, 1, getCalls)
-	assert.False(t, updateCalled, "dry_run must not call UpdatePage")
-}
-
-func TestAppend_EndOfSection_DryRun(t *testing.T) {
-	body := `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>` +
+// TestAppend_DryRun table-drives the dry-run preview across positions. The
+// Task 4 incident symptom was `"position": "unknown"` alongside an EMPTY
+// action_summary, so every case pins both fields together, not just position.
+func TestAppend_DryRun(t *testing.T) {
+	const endOfSectionBody = `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>` +
 		`<h2>Section A</h2><p>existing</p><h2>Section B</h2><p>other</p>` +
 		`</ac:layout-cell></ac:layout-section></ac:layout>`
-	getCalls := 0
-	updateCalled := false
-	h := &handlers{client: &mockClient{
-		GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
-			getCalls++
-			return &confluence.Page{
-				ID: id, Title: "Test", Version: confluence.PageVersion{Number: 1},
-				Body: confluence.PageBody{Storage: confluence.StorageBody{Value: body}},
-			}, nil
-		},
-		UpdatePageFn: func(_ context.Context, _ string, _ map[string]any) (*confluence.Page, error) {
-			updateCalled = true
-			return nil, nil
-		},
-	}}
 
-	msg, err := h.writeAppend(context.Background(), WriteItem{
-		PageID: "p1", Body: "dry note", Position: "end_of_section", Heading: "Section A",
-	}, true)
-	require.NoError(t, err)
-	assert.Contains(t, msg, "Would append")
-	assert.Contains(t, msg, `"position": "end_of_section"`)
-	assert.Contains(t, msg, `"input_body": "dry note"`)
-	assert.Equal(t, 1, getCalls)
-	assert.False(t, updateCalled, "dry_run must not call UpdatePage")
+	tests := []struct {
+		name         string
+		body         string
+		position     string
+		heading      string
+		wantPosition string
+		wantSummary  string
+	}{
+		{
+			name:         "end",
+			body:         appendTestLayoutBody,
+			position:     "end",
+			wantPosition: "end",
+			wantSummary:  "Append to end of page.",
+		},
+		{
+			name:         "end_of_section",
+			body:         endOfSectionBody,
+			position:     "end_of_section",
+			heading:      "Section A",
+			wantPosition: "end_of_section",
+			wantSummary:  `Append to end of section "Section A".`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getCalls := 0
+			updateCalled := false
+			h := &handlers{client: &mockClient{
+				GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
+					getCalls++
+					return &confluence.Page{
+						ID: id, Title: "Test", Version: confluence.PageVersion{Number: 1},
+						Body: confluence.PageBody{Storage: confluence.StorageBody{Value: tt.body}},
+					}, nil
+				},
+				UpdatePageFn: func(_ context.Context, _ string, _ map[string]any) (*confluence.Page, error) {
+					updateCalled = true
+					return nil, nil
+				},
+			}}
+
+			msg, err := h.writeAppend(context.Background(), WriteItem{
+				PageID: "p1", Body: "dry note", Position: tt.position, Heading: tt.heading,
+			}, true)
+			require.NoError(t, err)
+			assert.Contains(t, msg, "Would append")
+			// Preview JSON should be embedded.
+			assert.Contains(t, msg, fmt.Sprintf(`"position": %q`, tt.wantPosition))
+			assert.Contains(t, msg, fmt.Sprintf(`"action_summary": %q`, tt.wantSummary))
+			assert.Contains(t, msg, `"input_body": "dry note"`)
+			assert.Contains(t, msg, `"storage_output":`)
+			assert.Equal(t, 1, getCalls)
+			assert.False(t, updateCalled, "dry_run must not call UpdatePage")
+		})
+	}
 }
 
 func TestAppend_StorageFormat_SkipsConversion(t *testing.T) {

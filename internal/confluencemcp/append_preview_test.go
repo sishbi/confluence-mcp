@@ -102,8 +102,15 @@ func TestBuildPreview(t *testing.T) {
 		if p.ActionSummary == "" {
 			t.Errorf("ActionSummary empty")
 		}
-		if p.Context.Before == "" || p.Context.After == "" {
-			t.Errorf("Context.Before/After should both be populated")
+		// Must show the section's existing content in Before (proves the
+		// splice point is below it, not at the top of the section — the
+		// after_heading defect this mode exists to avoid) and the next
+		// heading in After.
+		if !strings.Contains(p.Context.Before, "existing") {
+			t.Errorf("Context.Before should contain the section's existing content: %q", p.Context.Before)
+		}
+		if !strings.HasPrefix(p.Context.After, "<h2>B</h2>") {
+			t.Errorf("Context.After should begin at the next heading: %q", p.Context.After)
 		}
 		const wantAnchor = "before next heading at same or higher level"
 		if p.Boundary.InsertAnchor != wantAnchor {
@@ -135,35 +142,22 @@ func replaceStr(pattern, v string) string {
 	return strings.Replace(pattern, "%s", v, 1)
 }
 
-func TestModeString(t *testing.T) {
-	tests := []struct {
-		name string
-		mode Mode
-		want string
-	}{
-		{"end", ModeEnd, "end"},
-		{"after_heading", ModeAfterHeading, "after_heading"},
-		{"replace_section", ModeReplaceSection, "replace_section"},
-		{"end_of_section", ModeEndOfSection, "end_of_section"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := modeString(tt.mode); got != tt.want {
-				t.Errorf("modeString(%v) = %q, want %q", tt.mode, got, tt.want)
-			}
-		})
+// TestModeString_Unknown covers the one branch buildPreview's subtests cannot
+// reach: an out-of-range Mode falling through to the default case. The four
+// known mappings are already asserted via p.Position in each TestBuildPreview
+// subtest above.
+func TestModeString_Unknown(t *testing.T) {
+	const outOfRange Mode = 99
+	if got := modeString(outOfRange); got != "unknown" {
+		t.Errorf("modeString(%v) = %q, want %q", outOfRange, got, "unknown")
 	}
 }
 
-func TestSummariseAction_EndOfSectionDistinctFromAfterHeading(t *testing.T) {
-	afterHeading := summariseAction(ModeAfterHeading, "A", BoundaryInfo{})
-	endOfSection := summariseAction(ModeEndOfSection, "A", BoundaryInfo{})
-	if afterHeading == endOfSection {
-		t.Errorf("summariseAction should differ between after_heading and end_of_section, got %q for both", afterHeading)
-	}
+func TestSummariseAction_EndOfSection(t *testing.T) {
+	got := summariseAction(ModeEndOfSection, "A", BoundaryInfo{})
 	const want = `Append to end of section "A".`
-	if endOfSection != want {
-		t.Errorf("summariseAction(ModeEndOfSection, ...) = %q, want %q", endOfSection, want)
+	if got != want {
+		t.Errorf("summariseAction(ModeEndOfSection, ...) = %q, want %q", got, want)
 	}
 }
 
@@ -178,5 +172,19 @@ func TestContextAround_EndOfSection(t *testing.T) {
 	}
 	if !strings.HasPrefix(after, "<h2>B</h2>") {
 		t.Errorf("after should begin at the next heading (the splice/stop point): %q", after)
+	}
+}
+
+func TestContextAround_ReplaceSection(t *testing.T) {
+	base := `<h2>A</h2><p>old</p><h2>B</h2><p>other</p>`
+	before, after := contextAround(base, ModeReplaceSection, "A")
+	if !strings.HasSuffix(before, "<h2>A</h2>") {
+		t.Errorf("before should end at the target heading's closing tag: %q", before)
+	}
+	if strings.Contains(before, "old") {
+		t.Errorf("before should not contain the section's existing body text (it is being replaced): %q", before)
+	}
+	if !strings.HasPrefix(after, "<h2>B</h2>") {
+		t.Errorf("after should begin at the next heading: %q", after)
 	}
 }

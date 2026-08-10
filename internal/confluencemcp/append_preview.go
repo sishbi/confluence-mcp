@@ -112,10 +112,10 @@ func summariseAction(mode Mode, heading string, b BoundaryInfo) string {
 
 // contextAround returns a snippet of base-body context before and after the
 // splice point. Kept small (≤ maxContextChars each side) to bound the preview
-// size. For ModeReplaceSection and ModeEndOfSection, the "after" context
-// begins at the section's stop-point (shared via findSectionEnd), so the
-// reviewer sees what survives a replace, or what immediately follows an
-// end-of-section insert.
+// size. ModeReplaceSection and ModeEndOfSection both stop at the section's end
+// via findSectionEnd, but keep separate cases: their "before" differs —
+// replace excludes the section body (it is being replaced), end-of-section
+// includes it (it is being kept).
 func contextAround(base string, mode Mode, heading string) (string, string) {
 	const maxContextChars = 400
 
@@ -143,27 +143,36 @@ func contextAround(base string, mode Mode, heading string) (string, string) {
 			return "", ""
 		}
 		return truncBefore(base[:match.headingEndOff]), truncAfter(base[match.headingEndOff:])
-	case ModeReplaceSection, ModeEndOfSection:
+	case ModeReplaceSection:
+		// "Before" ends at the heading itself — everything after it is being
+		// replaced, so none of the section's existing body appears. If the
+		// section's stop point can't be found, fall back to the heading-only
+		// view: there is nothing "after" to show for a replace regardless.
 		match, err := locateHeading(base, heading)
 		if err != nil {
 			return "", ""
 		}
-		// Both modes share the section-stop rule in findSectionEnd; they only
-		// differ in what "before" shows — replace-section shows the tail up to
-		// the heading (everything after it is being replaced), end-of-section
-		// shows the tail up to the stop point (everything up to there is kept).
 		stopOff, _, err := findSectionEnd(base, match)
 		if err != nil {
-			if mode == ModeReplaceSection {
-				return truncBefore(base[:match.headingEndOff]), ""
-			}
+			return truncBefore(base[:match.headingEndOff]), ""
+		}
+		return truncBefore(base[:match.headingEndOff]), truncAfter(base[stopOff:])
+	case ModeEndOfSection:
+		// "Before" runs all the way to the section's stop point, including
+		// the section's existing body — that's what distinguishes this from
+		// after_heading. If the stop point can't be found, fall back to no
+		// context at all rather than ModeReplaceSection's heading-only view:
+		// showing just the heading here would look like a top-of-section
+		// insert, which is precisely the confusion this mode exists to avoid.
+		match, err := locateHeading(base, heading)
+		if err != nil {
 			return "", ""
 		}
-		beforeOff := match.headingEndOff
-		if mode == ModeEndOfSection {
-			beforeOff = stopOff
+		stopOff, _, err := findSectionEnd(base, match)
+		if err != nil {
+			return "", ""
 		}
-		return truncBefore(base[:beforeOff]), truncAfter(base[stopOff:])
+		return truncBefore(base[:stopOff]), truncAfter(base[stopOff:])
 	default:
 		return "", ""
 	}

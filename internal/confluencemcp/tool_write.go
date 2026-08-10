@@ -27,7 +27,10 @@ type WriteItem struct {
 	CommentID     string `json:"comment_id,omitempty"`
 	Label         string `json:"label,omitempty"`
 	// Append-specific. Position is one of "end" (default), "after_heading",
-	// "replace_section". Heading is required for the latter two.
+	// "end_of_section", "replace_section". after_heading inserts at the TOP of
+	// the section (above its existing content); end_of_section inserts at the
+	// BOTTOM (after its existing content, before the next heading). Heading is
+	// required for every position except "end".
 	Position string `json:"position,omitempty"`
 	Heading  string `json:"heading,omitempty"`
 }
