@@ -84,6 +84,8 @@ func modeString(m Mode) string {
 		return "after_heading"
 	case ModeReplaceSection:
 		return "replace_section"
+	case ModeEndOfSection:
+		return "end_of_section"
 	default:
 		return "unknown"
 	}
@@ -101,6 +103,8 @@ func summariseAction(mode Mode, heading string, b BoundaryInfo) string {
 			summary += " (replaces " + strings.Join(b.ReplacedElementSummary, ", ") + ")"
 		}
 		return summary + "."
+	case ModeEndOfSection:
+		return fmt.Sprintf("Append to end of section %q.", heading)
 	default:
 		return ""
 	}
@@ -108,8 +112,10 @@ func summariseAction(mode Mode, heading string, b BoundaryInfo) string {
 
 // contextAround returns a snippet of base-body context before and after the
 // splice point. Kept small (≤ maxContextChars each side) to bound the preview
-// size. For ModeReplaceSection, the "after" context begins at the stop-point
-// (not the heading), so the reviewer sees what survives the replace.
+// size. ModeReplaceSection and ModeEndOfSection both stop at the section's end
+// via findSectionEnd, but keep separate cases: their "before" differs —
+// replace excludes the section body (it is being replaced), end-of-section
+// includes it (it is being kept).
 func contextAround(base string, mode Mode, heading string) (string, string) {
 	const maxContextChars = 400
 
@@ -138,19 +144,35 @@ func contextAround(base string, mode Mode, heading string) (string, string) {
 		}
 		return truncBefore(base[:match.headingEndOff]), truncAfter(base[match.headingEndOff:])
 	case ModeReplaceSection:
+		// "Before" ends at the heading itself — everything after it is being
+		// replaced, so none of the section's existing body appears. If the
+		// section's stop point can't be found, fall back to the heading-only
+		// view: there is nothing "after" to show for a replace regardless.
 		match, err := locateHeading(base, heading)
 		if err != nil {
 			return "", ""
 		}
-		// Recompute the stop offset for "after" context. We call
-		// spliceReplaceSection and use its result to tell us the end offset.
-		// This is a cheap second walk.
-		res, err := spliceReplaceSection(base, "", heading)
+		stopOff, _, err := findSectionEnd(base, match)
 		if err != nil {
 			return truncBefore(base[:match.headingEndOff]), ""
 		}
-		stopOff := match.headingEndOff + res.Boundary.ReplacedByteCount
 		return truncBefore(base[:match.headingEndOff]), truncAfter(base[stopOff:])
+	case ModeEndOfSection:
+		// "Before" runs all the way to the section's stop point, including
+		// the section's existing body — that's what distinguishes this from
+		// after_heading. If the stop point can't be found, fall back to no
+		// context at all rather than ModeReplaceSection's heading-only view:
+		// showing just the heading here would look like a top-of-section
+		// insert, which is precisely the confusion this mode exists to avoid.
+		match, err := locateHeading(base, heading)
+		if err != nil {
+			return "", ""
+		}
+		stopOff, _, err := findSectionEnd(base, match)
+		if err != nil {
+			return "", ""
+		}
+		return truncBefore(base[:stopOff]), truncAfter(base[stopOff:])
 	default:
 		return "", ""
 	}

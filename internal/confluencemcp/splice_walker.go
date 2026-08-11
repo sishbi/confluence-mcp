@@ -36,10 +36,12 @@ const (
 // unsafeContainerTags is the set of element local-names that make a splice
 // target inside them unsafe (we refuse to splice there).
 var unsafeContainerTags = map[string]bool{
-	"td":         true,
-	"th":         true,
-	"blockquote": true,
-	"li":         true,
+	"td":            true,
+	"th":            true,
+	"blockquote":    true,
+	"li":            true,
+	"adf-extension": true,
+	"task-body":     true,
 }
 
 // walkStorage walks the storage-format body and invokes fn for each structural

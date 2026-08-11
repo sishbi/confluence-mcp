@@ -3,6 +3,7 @@ package confluencemcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -57,34 +58,71 @@ func TestAppend_End_Markdown(t *testing.T) {
 	assert.Equal(t, 8, version["number"])
 }
 
-func TestAppend_End_DryRun(t *testing.T) {
-	getCalls := 0
-	updateCalled := false
-	h := &handlers{client: &mockClient{
-		GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
-			getCalls++
-			return &confluence.Page{
-				ID: id, Title: "Test", Version: confluence.PageVersion{Number: 1},
-				Body: confluence.PageBody{Storage: confluence.StorageBody{Value: appendTestLayoutBody}},
-			}, nil
-		},
-		UpdatePageFn: func(_ context.Context, _ string, _ map[string]any) (*confluence.Page, error) {
-			updateCalled = true
-			return nil, nil
-		},
-	}}
+// TestAppend_DryRun table-drives the dry-run preview across positions. A
+// position missing from the preview switch surfaces as `"position": "unknown"`
+// alongside an EMPTY action_summary, so every case pins both fields together
+// rather than position alone.
+func TestAppend_DryRun(t *testing.T) {
+	const endOfSectionBody = `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>` +
+		`<h2>Section A</h2><p>existing</p><h2>Section B</h2><p>other</p>` +
+		`</ac:layout-cell></ac:layout-section></ac:layout>`
 
-	msg, err := h.writeAppend(context.Background(), WriteItem{
-		PageID: "p1", Body: "dry note", Position: "end",
-	}, true)
-	require.NoError(t, err)
-	assert.Contains(t, msg, "Would append")
-	// Preview JSON should be embedded.
-	assert.Contains(t, msg, `"position": "end"`)
-	assert.Contains(t, msg, `"input_body": "dry note"`)
-	assert.Contains(t, msg, `"storage_output":`)
-	assert.Equal(t, 1, getCalls)
-	assert.False(t, updateCalled, "dry_run must not call UpdatePage")
+	tests := []struct {
+		name         string
+		body         string
+		position     string
+		heading      string
+		wantPosition string
+		wantSummary  string
+	}{
+		{
+			name:         "end",
+			body:         appendTestLayoutBody,
+			position:     "end",
+			wantPosition: "end",
+			wantSummary:  "Append to end of page.",
+		},
+		{
+			name:         "end_of_section",
+			body:         endOfSectionBody,
+			position:     "end_of_section",
+			heading:      "Section A",
+			wantPosition: "end_of_section",
+			wantSummary:  `Append to end of section "Section A".`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getCalls := 0
+			updateCalled := false
+			h := &handlers{client: &mockClient{
+				GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
+					getCalls++
+					return &confluence.Page{
+						ID: id, Title: "Test", Version: confluence.PageVersion{Number: 1},
+						Body: confluence.PageBody{Storage: confluence.StorageBody{Value: tt.body}},
+					}, nil
+				},
+				UpdatePageFn: func(_ context.Context, _ string, _ map[string]any) (*confluence.Page, error) {
+					updateCalled = true
+					return nil, nil
+				},
+			}}
+
+			msg, err := h.writeAppend(context.Background(), WriteItem{
+				PageID: "p1", Body: "dry note", Position: tt.position, Heading: tt.heading,
+			}, true)
+			require.NoError(t, err)
+			assert.Contains(t, msg, "Would append")
+			// Preview JSON should be embedded.
+			assert.Contains(t, msg, fmt.Sprintf(`"position": %q`, tt.wantPosition))
+			assert.Contains(t, msg, fmt.Sprintf(`"action_summary": %q`, tt.wantSummary))
+			assert.Contains(t, msg, `"input_body": "dry note"`)
+			assert.Contains(t, msg, `"storage_output":`)
+			assert.Equal(t, 1, getCalls)
+			assert.False(t, updateCalled, "dry_run must not call UpdatePage")
+		})
+	}
 }
 
 func TestAppend_StorageFormat_SkipsConversion(t *testing.T) {
@@ -150,13 +188,78 @@ func TestAppend_RequiredFields(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, strings.ToLower(err.Error()), "heading")
 	})
+	t.Run("heading required for end_of_section", func(t *testing.T) {
+		_, err := h.writeAppend(context.Background(), WriteItem{
+			PageID: "p1", Body: "x", Position: "end_of_section",
+		}, false)
+		require.Error(t, err)
+		assert.Contains(t, strings.ToLower(err.Error()), "heading")
+	})
 	t.Run("unknown position rejected", func(t *testing.T) {
 		_, err := h.writeAppend(context.Background(), WriteItem{
 			PageID: "p1", Body: "x", Position: "fly_away",
 		}, false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unknown position")
+		// An agent that guesses wrong should be told end_of_section exists.
+		assert.Contains(t, err.Error(), "end_of_section")
 	})
+}
+
+func TestParseMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		position string
+		want     Mode
+	}{
+		{"empty defaults to end", "", ModeEnd},
+		{"end", "end", ModeEnd},
+		{"after_heading", "after_heading", ModeAfterHeading},
+		{"replace_section", "replace_section", ModeReplaceSection},
+		{"end_of_section", "end_of_section", ModeEndOfSection},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseMode(tt.position)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestAppend_EndOfSection(t *testing.T) {
+	body := `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>` +
+		`<h2>Section A</h2><p>existing</p><h2>Section B</h2><p>other</p>` +
+		`</ac:layout-cell></ac:layout-section></ac:layout>`
+	var captured map[string]any
+	h := &handlers{client: newAppendPageMock(body, &captured)}
+
+	msg, err := h.writeAppend(context.Background(), WriteItem{
+		PageID:   "p1",
+		Body:     "New paragraph.",
+		Position: "end_of_section",
+		Heading:  "Section A",
+	}, false)
+	require.NoError(t, err)
+	assert.Contains(t, msg, "Appended to")
+
+	updatedBody := captured["body"].(map[string]any)
+	storage := updatedBody["storage"].(map[string]any)
+	value := storage["value"].(string)
+
+	// Regression case for the incident this mode fixes: the new fragment must
+	// land at the END of Section A (after its own paragraph), and Section B's
+	// paragraph must stay attached to Section B rather than being pushed below
+	// the new content.
+	require.Contains(t, value, "New paragraph.")
+	idxExisting := strings.Index(value, "existing")
+	idxNew := strings.Index(value, "New paragraph.")
+	idxSectionB := strings.Index(value, "Section B")
+	idxOther := strings.Index(value, "other")
+	require.True(t, idxExisting >= 0 && idxNew >= 0 && idxSectionB >= 0 && idxOther >= 0)
+	assert.True(t, idxExisting < idxNew, "existing paragraph should precede the new fragment")
+	assert.True(t, idxNew < idxSectionB, "new fragment should precede Section B's heading")
+	assert.True(t, idxSectionB < idxOther, "Section B heading should precede its own paragraph")
 }
 
 func TestAppend_VersionMismatch(t *testing.T) {

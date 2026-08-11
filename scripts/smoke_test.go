@@ -931,6 +931,66 @@ func TestSmoke_Append_AfterHeading(t *testing.T) {
 	assert.Less(t, sentinelIdx, nextHeadingIdx, "sentinel should appear before next h2")
 }
 
+// TestSmoke_Append_EndOfSection exercises position=end_of_section against a
+// real heading with an existing sibling section below it — the exact shape of
+// the defect this mode fixes. Asserts the ordering
+// heading < existing content < sentinel < next heading, which is what
+// distinguishes end_of_section from after_heading: the latter would place the
+// sentinel above the section's own content, reattributing it to the new
+// section.
+func TestSmoke_Append_EndOfSection(t *testing.T) {
+	pageID := smokePageID()
+	if pageID == "" {
+		t.Skip("SMOKE_PAGE_ID not set")
+	}
+	env := newLiveEnv(t)
+	original := snapshotAndRestorePage(t, env, pageID)
+
+	const heading = "27. Final Verification Notes"
+	const oldContentMarker = "Check that real Confluence macros (TOC, Jira, excerpt"
+	require.Contains(t, original.Body.Storage.Value, oldContentMarker,
+		"fixture page unexpectedly missing reference content — test cannot verify end-of-section placement")
+
+	sentinel := fmt.Sprintf("Smoke end_of_section sentinel %d", time.Now().UnixNano())
+
+	text := callTool(t, env.session, "confluence_write", map[string]any{
+		"action": "append",
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     sentinel,
+			"position": "end_of_section",
+			"heading":  heading,
+		}},
+	})
+	assert.Contains(t, text, "Appended to")
+
+	updated, err := env.client.GetPage(context.Background(), pageID)
+	require.NoError(t, err)
+	assert.Greater(t, updated.Version.Number, original.Version.Number)
+
+	storage := updated.Body.Storage.Value
+	assert.Contains(t, storage, sentinel)
+	assert.Contains(t, storage, heading)
+	sentinelIdx := strings.Index(storage, sentinel)
+	headingIdx := strings.Index(storage, heading)
+	oldContentIdx := strings.Index(storage, oldContentMarker)
+	nextHeadingIdx := strings.Index(storage, "28. Additional Headings")
+	require.Positive(t, sentinelIdx, "sentinel missing")
+	require.Positive(t, headingIdx, "target heading missing")
+	require.Positive(t, oldContentIdx, "target section's existing content missing")
+	require.Positive(t, nextHeadingIdx, "next heading missing")
+	assert.Greater(t, sentinelIdx, headingIdx, "sentinel should appear after target heading")
+	// Discriminating assertion: sentinel must land AFTER section 27's own
+	// existing content, not at the top of the section. after_heading would
+	// place it here instead — this is the assertion that catches that mistake.
+	assert.Greater(t, sentinelIdx, oldContentIdx, "sentinel should appear after the section's existing content, not at its top")
+	assert.Less(t, sentinelIdx, nextHeadingIdx, "sentinel should appear before next h2")
+	// The section's existing content must still sit under its own heading. With
+	// the assertion above, this pins the full incident invariant:
+	// heading < existing content < sentinel < next heading.
+	assert.Greater(t, oldContentIdx, headingIdx, "the section's existing content should stay under its own heading")
+}
+
 // TestSmoke_Append_ReplaceSection exercises position=replace_section. Replaces
 // content under a known heading, asserts the old content is gone, the fragment
 // is present, and the next heading survives (no cross-layout-boundary walk).

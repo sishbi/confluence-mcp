@@ -54,7 +54,7 @@ scripts/                        install-mcp.sh, confluence-mcp-wrapper.sh, smoke
 - Tool handlers live in separate files per tool (`tool_read.go`, `tool_write.go`) with corresponding `_test.go` files plus `integration_test.go` (in-process MCP client/server via `NewInMemoryTransports`).
 - A receiving middleware in `server.go` logs every `tools/call` request with tool name, duration, and result size.
 - `confluence_write` accepts Markdown in body fields and auto-converts to storage format via `mdconv.ToStorageFormat()`. Setting `format="storage"` on an item pushes raw XHTML through (for macro authoring).
-- The `append` action performs a server-side splice: the handler fetches the current storage body, splices the fragment via `internal/confluencemcp/splice.go`, and PUTs the merged result — but the agent only sends the fragment (not the full body). Typical edits are ~100× smaller than `update` payloads, cutting both wall-clock and token cost. The success message reports fragment size and base→merged body bytes so the saving is visible to the caller. Always prefer `append` over `update` for additive edits or single-section replacements; use `update` only when rewriting the whole page. Retries once on 409 when no `version_number` is pinned (Confluence read replicas are eventually consistent); surfaces `version_conflict` without retry when the caller pins a version.
+- The `append` action performs a server-side splice: the handler fetches the current storage body, splices the fragment via `internal/confluencemcp/splice.go`, and PUTs the merged result — but the agent only sends the fragment (not the full body). Typical edits are ~100× smaller than `update` payloads, cutting both wall-clock and token cost. The success message reports fragment size and base→merged body bytes so the saving is visible to the caller. Always prefer `append` over `update` for additive edits or single-section replacements; use `update` only when rewriting the whole page. Positions are `end`, `after_heading`, `end_of_section`, `replace_section`: `after_heading` inserts at the top of a section, `end_of_section` at the bottom (after its existing content, before the next heading) — a new sibling section wants `end_of_section`, since `after_heading` displaces the target section's own body into it. Retries once on 409 when no `version_number` is pinned (Confluence read replicas are eventually consistent); surfaces `version_conflict` without retry when the caller pins a version.
 - `confluence_read` converts storage-format responses to Markdown via `mdconv.ToMarkdownWithMacrosResolved()` using a per-conversion `pageResolver` (user cache, depth cap 3). Setting `format="storage"` returns raw XHTML instead.
 - Long pages are adaptively chunked: if content exceeds the threshold, the first chunk + a TOC is returned. Follow-ups use either `section` (by heading) or `next_page_token` (base64url JSON cursor with section-index or byte-offset mode). Cache-served with a silent refetch fallback if the cache has evicted.
 - A 60-second in-memory page cache keyed by page ID avoids re-fetching for section follow-ups. Successful `update` and `delete` evict the cache.
@@ -74,8 +74,10 @@ scripts/                        install-mcp.sh, confluence-mcp-wrapper.sh, smoke
 
 ## Design & Implementation Plans
 
-Full design doc and 6 implementation plans are in `.claude/local-plans/`. Start with the master plan:
-`.claude/local-plans/2026-04-14-confluence-mcp-master-plan.md`
+Design docs and implementation plans live in `.ai-local-plans/`. That directory is untracked (it
+carries a `.gitignore` of `*`), so they are local working notes rather than repo content — a fresh
+clone has none. Where present, start with
+`.ai-local-plans/2026-04-14-confluence-mcp-master-plan.md`.
 
 ## Quality Gates
 

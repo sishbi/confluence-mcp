@@ -12,17 +12,20 @@ type headingMatch struct {
 	headingStartOff int
 	// headingEndOff is the byte offset just past the closing tag in the body.
 	headingEndOff int
-	// layoutCellDepth and macroDepth recorded at the opening tag.
-	layoutCellDepth int
-	macroDepth      int
+	// layoutCellDepth, macroDepth, and unsafeContainerDepth recorded at the
+	// opening tag.
+	layoutCellDepth      int
+	macroDepth           int
+	unsafeContainerDepth int
 }
 
 // locateHeading walks body looking for a heading whose extracted text equals
 // heading (decoded, whitespace-collapsed, trimmed). Returns the match or a
 // sentinel error (ErrHeadingNotFound, ErrHeadingInUnsafeContainer,
-// ErrAmbiguousHeading). Matches inside unsafe containers (macro body, td, th,
-// blockquote, li) are excluded from candidacy; the unsafe error only fires if
-// no safe candidate exists and at least one unsafe candidate does.
+// ErrAmbiguousHeading). Matches inside a macro body or any of the
+// unsafeContainerTags (see splice_walker.go) are excluded from candidacy; the
+// unsafe error only fires if no safe candidate exists and at least one
+// unsafe candidate does.
 func locateHeading(body, heading string) (headingMatch, error) {
 	want := normalizeHeading(heading)
 
@@ -41,10 +44,11 @@ func locateHeading(body, heading string) (headingMatch, error) {
 		case eventHeadingStart:
 			c := &candidate{
 				match: headingMatch{
-					level:           ev.level,
-					headingStartOff: ev.tokStart,
-					layoutCellDepth: ev.layoutCellDepth,
-					macroDepth:      ev.macroDepth,
+					level:                ev.level,
+					headingStartOff:      ev.tokStart,
+					layoutCellDepth:      ev.layoutCellDepth,
+					macroDepth:           ev.macroDepth,
+					unsafeContainerDepth: ev.unsafeContainerDepth,
 				},
 				safe: ev.macroDepth == 0 && ev.unsafeContainerDepth == 0,
 			}

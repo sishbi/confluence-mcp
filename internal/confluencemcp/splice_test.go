@@ -44,6 +44,19 @@ func TestSplice_DispatchesByMode(t *testing.T) {
 		}
 	})
 
+	t.Run("ModeEndOfSection", func(t *testing.T) {
+		res, err := Splice(body, fragment, SpliceOptions{Mode: ModeEndOfSection, Heading: "Section A"})
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if res.Boundary.InsertAnchor == "" {
+			t.Errorf("InsertAnchor empty — ModeEndOfSection did not run")
+		}
+		if res.Boundary.StartAnchor != "" {
+			t.Errorf("StartAnchor should be empty for ModeEndOfSection")
+		}
+	})
+
 	t.Run("unknown mode returns ErrNotImplemented", func(t *testing.T) {
 		_, err := Splice(body, fragment, SpliceOptions{Mode: Mode(99)})
 		if !errors.Is(err, ErrNotImplemented) {
@@ -93,6 +106,21 @@ func TestWalker_TracksDepth(t *testing.T) {
 			name: "heading inside td",
 			body: `<table><tbody><tr><td><h4>InTd</h4></td></tr></tbody></table>`,
 			want: []headingObservation{{4, 0, 0, 1}},
+		},
+		{
+			name: "heading inside ac:adf-content panel",
+			body: `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-content><h2>Inside</h2></ac:adf-content></ac:adf-node></ac:adf-extension>`,
+			want: []headingObservation{{2, 0, 0, 1}},
+		},
+		{
+			name: "heading inside ac:adf-fallback",
+			body: `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-fallback><div><h2>Inside</h2></div></ac:adf-fallback></ac:adf-node></ac:adf-extension>`,
+			want: []headingObservation{{2, 0, 0, 1}},
+		},
+		{
+			name: "heading inside ac:task-body",
+			body: `<ac:task-list><ac:task><ac:task-body><h3>Inside</h3></ac:task-body></ac:task></ac:task-list>`,
+			want: []headingObservation{{3, 0, 0, 1}},
 		},
 	}
 
@@ -157,6 +185,24 @@ func TestLocateHeading(t *testing.T) {
 			name:    "only match inside td",
 			body:    `<table><tbody><tr><td><h4>Target</h4></td></tr></tbody></table>`,
 			heading: "Target",
+			wantErr: ErrHeadingInUnsafeContainer,
+		},
+		{
+			name:    "only match inside ac:adf-content panel",
+			body:    `<ac:adf-extension><ac:adf-node type="panel"><ac:adf-content><h2>Target</h2></ac:adf-content></ac:adf-node></ac:adf-extension>`,
+			heading: "Target",
+			wantErr: ErrHeadingInUnsafeContainer,
+		},
+		{
+			name:    "only match inside ac:task-body",
+			body:    `<ac:task-list><ac:task><ac:task-body><h3>Target</h3></ac:task-body></ac:task></ac:task-list>`,
+			heading: "Target",
+			wantErr: ErrHeadingInUnsafeContainer,
+		},
+		{
+			name:    "ADF panel with both ac:adf-content and ac:adf-fallback — fallback-nested heading is also unsafe",
+			body:    `<h2>A</h2><p>x</p><ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">info</ac:adf-attribute><ac:adf-content><h2>Nested</h2><p>c</p></ac:adf-content></ac:adf-node><ac:adf-fallback><div class="panel"><div class="panelContent"><h2>Nested</h2><p>c</p></div></div></ac:adf-fallback></ac:adf-extension><h2>B</h2>`,
+			heading: "Nested",
 			wantErr: ErrHeadingInUnsafeContainer,
 		},
 		{
@@ -428,6 +474,98 @@ func TestSplice_ReplaceSection(t *testing.T) {
 		}
 	})
 
+	t.Run("regression: same-or-higher heading nested inside an unsafe container does not become the stop, and the enclosing container is fully replaced", func(t *testing.T) {
+		// Well-formed in every case: the whole enclosing element is removed as
+		// one unit (its own open and close tags travel together), never
+		// leaving an orphaned open tag or a dangling close tag behind.
+		cases := []struct {
+			name string
+			body string
+			want string
+		}{
+			{
+				name: "td",
+				body: `<h2>A</h2><p>x</p><table><tbody><tr><td><h2>Nested</h2><p>c</p></td></tr></tbody></table><h2>B</h2>`,
+				want: `<h2>A</h2><p>NEW</p><h2>B</h2>`,
+			},
+			{
+				name: "ADF panel (ac:adf-content)",
+				body: `<h2>A</h2><p>x</p><ac:adf-extension><ac:adf-node type="panel"><ac:adf-content><h2>Nested</h2><p>c</p></ac:adf-content></ac:adf-node></ac:adf-extension><h2>B</h2>`,
+				want: `<h2>A</h2><p>NEW</p><h2>B</h2>`,
+			},
+			{
+				name: "ADF panel with both ac:adf-content and ac:adf-fallback",
+				body: `<h2>A</h2><p>x</p><ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">info</ac:adf-attribute><ac:adf-content><h2>Nested</h2><p>c</p></ac:adf-content></ac:adf-node><ac:adf-fallback><div class="panel"><div class="panelContent"><h2>Nested</h2><p>c</p></div></div></ac:adf-fallback></ac:adf-extension><h2>B</h2>`,
+				want: `<h2>A</h2><p>NEW</p><h2>B</h2>`,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				res, err := spliceReplaceSection(tc.body, `<p>NEW</p>`, "A")
+				if err != nil {
+					t.Fatalf("unexpected err: %v", err)
+				}
+				if res.Merged != tc.want {
+					t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("ReplacedElementSummary does not double-count when a nested container shares the top-level element's tag name", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>A</h2><ul><li><ul><li><p>x</p></li></ul><p>y</p></li></ul><h2>B</h2>`)
+		res, err := spliceReplaceSection(body, `<p>new</p>`, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		// The inner </ul> (nested two <li> deep) must not be mistaken for the
+		// close of the top-level <ul>, which would otherwise let <p>y</p> be
+		// counted as a second top-level sibling.
+		want := []string{"<ul> x 1"}
+		if len(res.Boundary.ReplacedElementSummary) != len(want) || res.Boundary.ReplacedElementSummary[0] != want[0] {
+			t.Errorf("got %v, want %v", res.Boundary.ReplacedElementSummary, want)
+		}
+	})
+
+	t.Run("ReplacedElementSummary includes a top-level sibling that is itself an unsafe-container tag", func(t *testing.T) {
+		cases := []struct {
+			name string
+			body string
+			want []string
+		}{
+			{
+				name: "blockquote sibling",
+				body: `<h2>A</h2><p>x</p><blockquote><p>q</p></blockquote><p>y</p><h2>B</h2>`,
+				want: []string{"<p> x 2", "<blockquote> x 1"},
+			},
+			{
+				name: "adf-extension sibling",
+				body: `<h2>A</h2><p>x</p><ac:adf-extension><ac:adf-node type="panel"><ac:adf-content><p>q</p></ac:adf-content></ac:adf-node></ac:adf-extension><p>y</p><h2>B</h2>`,
+				want: []string{"<p> x 2", "<adf-extension> x 1"},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				res, err := spliceReplaceSection(tc.body, `<p>new</p>`, "A")
+				if err != nil {
+					t.Fatalf("unexpected err: %v", err)
+				}
+				want := `<h2>A</h2><p>new</p><h2>B</h2>`
+				if res.Merged != want {
+					t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+				}
+				if len(res.Boundary.ReplacedElementSummary) != len(tc.want) {
+					t.Fatalf("got %v, want %v", res.Boundary.ReplacedElementSummary, tc.want)
+				}
+				for i, w := range tc.want {
+					if res.Boundary.ReplacedElementSummary[i] != w {
+						t.Errorf("got %v, want %v", res.Boundary.ReplacedElementSummary, tc.want)
+					}
+				}
+			})
+		}
+	})
+
 	t.Run("ReplacedElementSummary counts top-level replaced elements", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><p>p1</p><p>p2</p><ul><li><p>li</p></li></ul><h2>B</h2>`)
 		res, err := spliceReplaceSection(body, `<p>new</p>`, "A")
@@ -484,6 +622,206 @@ func TestSplice_ReplaceSection(t *testing.T) {
 		want := fmt.Sprintf(cell, `<h2>A</h2><h3>Details</h3><p>new</p><h2>B</h2>`)
 		if res.Merged != want {
 			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
+}
+
+func TestSplice_EndOfSection(t *testing.T) {
+	const cell = `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>%s</ac:layout-cell></ac:layout-section></ac:layout>`
+
+	t.Run("regression: new sibling section lands between, first section keeps its paragraph", func(t *testing.T) {
+		body := `<h2>Section 6.6</h2><p>paragraph for 6.6</p><h2>Section 6.8</h2><p>other</p>`
+		fragment := `<h2>Section 6.7</h2><p>new content</p>`
+		res, err := spliceEndOfSection(body, fragment, "Section 6.6")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := `<h2>Section 6.6</h2><p>paragraph for 6.6</p><h2>Section 6.7</h2><p>new content</p><h2>Section 6.8</h2><p>other</p>`
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+		if res.Boundary.InsertAnchor != "before next heading at same or higher level" {
+			t.Errorf("got InsertAnchor %q, want %q", res.Boundary.InsertAnchor, "before next heading at same or higher level")
+		}
+	})
+
+	t.Run("appends to section that already has content", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>A</h2><p>existing</p><h2>B</h2>`)
+		fragment := `<p>new</p>`
+		res, err := spliceEndOfSection(body, fragment, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := fmt.Sprintf(cell, `<h2>A</h2><p>existing</p><p>new</p><h2>B</h2>`)
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+		// ModeEndOfSection must not populate the replace-only BoundaryInfo fields.
+		if res.Boundary.EndAnchor != "" {
+			t.Errorf("EndAnchor should be empty, got %q", res.Boundary.EndAnchor)
+		}
+		if res.Boundary.StartAnchor != "" {
+			t.Errorf("StartAnchor should be empty, got %q", res.Boundary.StartAnchor)
+		}
+		if res.Boundary.ReplacedByteCount != 0 {
+			t.Errorf("ReplacedByteCount should be 0, got %d", res.Boundary.ReplacedByteCount)
+		}
+		if res.Boundary.ReplacedElementSummary != nil {
+			t.Errorf("ReplacedElementSummary should be nil, got %v", res.Boundary.ReplacedElementSummary)
+		}
+	})
+
+	t.Run("last section on the page with no layout: inserts at end of body", func(t *testing.T) {
+		body := `<h2>A</h2><p>only</p>`
+		fragment := `<p>new</p>`
+		res, err := spliceEndOfSection(body, fragment, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := `<h2>A</h2><p>only</p><p>new</p>`
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+		if res.Boundary.InsertAnchor != "end of document root" {
+			t.Errorf("got InsertAnchor %q, want %q", res.Boundary.InsertAnchor, "end of document root")
+		}
+	})
+
+	t.Run("section ending at ac:layout-cell close: inserts before the close, never crosses it", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>A</h2><p>old</p>`)
+		fragment := `<p>new</p>`
+		res, err := spliceEndOfSection(body, fragment, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := fmt.Sprintf(cell, `<h2>A</h2><p>old</p><p>new</p>`)
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+		if res.Boundary.CrossesLayout {
+			t.Errorf("CrossesLayout should be false")
+		}
+		if res.Boundary.InsertAnchor != "end of ac:layout-cell" {
+			t.Errorf("got InsertAnchor %q, want %q", res.Boundary.InsertAnchor, "end of ac:layout-cell")
+		}
+	})
+
+	t.Run("subsection present: stop is the next h2, fragment lands after the h3's content", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>A</h2><p>p1</p><h3>sub</h3><p>p2</p><h2>B</h2>`)
+		fragment := `<p>new</p>`
+		res, err := spliceEndOfSection(body, fragment, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := fmt.Sprintf(cell, `<h2>A</h2><p>p1</p><h3>sub</h3><p>p2</p><p>new</p><h2>B</h2>`)
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
+
+	t.Run("fragment beginning with a heading matching the target text is preserved, not stripped", func(t *testing.T) {
+		body := `<h2>Data scrubbing</h2><p>old</p><h2>B</h2>`
+		fragment := `<h2>Data scrubbing</h2><p>new</p>`
+		res, err := spliceEndOfSection(body, fragment, "Data scrubbing")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := `<h2>Data scrubbing</h2><p>old</p><h2>Data scrubbing</h2><p>new</p><h2>B</h2>`
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
+
+	t.Run("passthrough errors from locateHeading", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			body    string
+			heading string
+			wantErr error
+		}{
+			{
+				name:    "heading not found",
+				body:    `<h2>A</h2>`,
+				heading: "Missing",
+				wantErr: ErrHeadingNotFound,
+			},
+			{
+				name:    "ambiguous heading",
+				body:    `<h2>Dup</h2><p>a</p><h2>Dup</h2>`,
+				heading: "Dup",
+				wantErr: ErrAmbiguousHeading,
+			},
+			{
+				name:    "heading in macro",
+				body:    `<ac:structured-macro ac:name="expand"><ac:rich-text-body><h3>T</h3></ac:rich-text-body></ac:structured-macro>`,
+				heading: "T",
+				wantErr: ErrHeadingInUnsafeContainer,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := spliceEndOfSection(tc.body, `<p>x</p>`, tc.heading)
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("got %v, want %v", err, tc.wantErr)
+				}
+			})
+		}
+	})
+
+	t.Run("regression: fragment lands after the nested same-or-higher heading's unsafe container, never inside it", func(t *testing.T) {
+		cases := []struct {
+			name string
+			body string
+			want string
+		}{
+			{
+				name: "td",
+				body: `<h2>A</h2><p>x</p><table><tbody><tr><td><h2>Nested</h2><p>c</p></td></tr></tbody></table><h2>B</h2>`,
+				want: `<h2>A</h2><p>x</p><table><tbody><tr><td><h2>Nested</h2><p>c</p></td></tr></tbody></table><p>NEW</p><h2>B</h2>`,
+			},
+			{
+				name: "li (list)",
+				body: `<h3>A</h3><p>x</p><ul><li><h3>Nested</h3><p>c</p></li></ul><h3>B</h3>`,
+				want: `<h3>A</h3><p>x</p><ul><li><h3>Nested</h3><p>c</p></li></ul><p>NEW</p><h3>B</h3>`,
+			},
+			{
+				name: "ADF panel (ac:adf-content)",
+				body: `<h2>A</h2><p>x</p><ac:adf-extension><ac:adf-node type="panel"><ac:adf-content><h2>Nested</h2><p>c</p></ac:adf-content></ac:adf-node></ac:adf-extension><h2>B</h2>`,
+				want: `<h2>A</h2><p>x</p><ac:adf-extension><ac:adf-node type="panel"><ac:adf-content><h2>Nested</h2><p>c</p></ac:adf-content></ac:adf-node></ac:adf-extension><p>NEW</p><h2>B</h2>`,
+			},
+			{
+				name: "ADF panel with both ac:adf-content and ac:adf-fallback",
+				body: `<h2>A</h2><p>x</p><ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">info</ac:adf-attribute><ac:adf-content><h2>Nested</h2><p>c</p></ac:adf-content></ac:adf-node><ac:adf-fallback><div class="panel"><div class="panelContent"><h2>Nested</h2><p>c</p></div></div></ac:adf-fallback></ac:adf-extension><h2>B</h2>`,
+				want: `<h2>A</h2><p>x</p><ac:adf-extension><ac:adf-node type="panel"><ac:adf-attribute key="panel-type">info</ac:adf-attribute><ac:adf-content><h2>Nested</h2><p>c</p></ac:adf-content></ac:adf-node><ac:adf-fallback><div class="panel"><div class="panelContent"><h2>Nested</h2><p>c</p></div></div></ac:adf-fallback></ac:adf-extension><p>NEW</p><h2>B</h2>`,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				res, err := spliceEndOfSection(tc.body, `<p>NEW</p>`, "A")
+				if err != nil {
+					t.Fatalf("unexpected err: %v", err)
+				}
+				if res.Merged != tc.want {
+					t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("regression: only same-or-higher heading is inside an unsafe container — stop falls through to layout-cell close", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>A</h2><p>x</p><table><tbody><tr><td><h2>Nested</h2><p>c</p></td></tr></tbody></table>`)
+		fragment := `<p>NEW</p>`
+		res, err := spliceEndOfSection(body, fragment, "A")
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := fmt.Sprintf(cell, `<h2>A</h2><p>x</p><table><tbody><tr><td><h2>Nested</h2><p>c</p></td></tr></tbody></table><p>NEW</p>`)
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+		if res.Boundary.InsertAnchor != "end of ac:layout-cell" {
+			t.Errorf("got InsertAnchor %q, want %q", res.Boundary.InsertAnchor, "end of ac:layout-cell")
 		}
 	})
 }

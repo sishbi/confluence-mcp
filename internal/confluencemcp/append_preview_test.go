@@ -88,6 +88,45 @@ func TestBuildPreview(t *testing.T) {
 		}
 	})
 
+	t.Run("ModeEndOfSection populates insert anchor and end-of-section context", func(t *testing.T) {
+		base := `<h2>A</h2><p>existing</p><h2>B</h2><p>other</p>`
+		fragment := `<p>new</p>`
+		res, err := Splice(base, fragment, SpliceOptions{Mode: ModeEndOfSection, Heading: "A"})
+		if err != nil {
+			t.Fatalf("splice: %v", err)
+		}
+		p := buildPreview("42", base, res.Merged, fragment, ModeEndOfSection, "A", res.Boundary, "new", "markdown")
+		if p.Position != "end_of_section" {
+			t.Errorf("Position = %q, want end_of_section", p.Position)
+		}
+		if p.ActionSummary == "" {
+			t.Errorf("ActionSummary empty")
+		}
+		// Must show the section's existing content in Before (proves the
+		// splice point is below it, not at the top of the section — the
+		// after_heading defect this mode exists to avoid) and the next
+		// heading in After.
+		if !strings.Contains(p.Context.Before, "existing") {
+			t.Errorf("Context.Before should contain the section's existing content: %q", p.Context.Before)
+		}
+		if strings.Contains(p.Context.Before, "<h2>B</h2>") {
+			t.Errorf("Context.Before should stop at the splice point, not run past the next heading: %q", p.Context.Before)
+		}
+		if !strings.HasPrefix(p.Context.After, "<h2>B</h2>") {
+			t.Errorf("Context.After should begin at the next heading: %q", p.Context.After)
+		}
+		const wantAnchor = "before next heading at same or higher level"
+		if p.Boundary.InsertAnchor != wantAnchor {
+			t.Errorf("InsertAnchor = %q, want %q", p.Boundary.InsertAnchor, wantAnchor)
+		}
+		if p.Boundary.ReplacedByteCount != 0 {
+			t.Errorf("ReplacedByteCount should be 0 for end_of_section, got %d", p.Boundary.ReplacedByteCount)
+		}
+		if p.Boundary.ReplacedElementSummary != nil {
+			t.Errorf("ReplacedElementSummary should be nil for end_of_section, got %v", p.Boundary.ReplacedElementSummary)
+		}
+	})
+
 	t.Run("DeltaBytes negative for shrinking replace", func(t *testing.T) {
 		base := `<h2>A</h2><p>aaaaaaaaaaaaaaaaaa</p>`
 		fragment := `<p>x</p>`
@@ -104,4 +143,21 @@ func TestBuildPreview(t *testing.T) {
 
 func replaceStr(pattern, v string) string {
 	return strings.Replace(pattern, "%s", v, 1)
+}
+
+// TestContextAround_ReplaceSection pins replace_section's before/after
+// asymmetry: unlike end_of_section, its "before" excludes the section body,
+// because that body is what is being replaced.
+func TestContextAround_ReplaceSection(t *testing.T) {
+	base := `<h2>A</h2><p>old</p><h2>B</h2><p>other</p>`
+	before, after := contextAround(base, ModeReplaceSection, "A")
+	if !strings.HasSuffix(before, "<h2>A</h2>") {
+		t.Errorf("before should end at the target heading's closing tag: %q", before)
+	}
+	if strings.Contains(before, "old") {
+		t.Errorf("before should not contain the section's existing body text (it is being replaced): %q", before)
+	}
+	if !strings.HasPrefix(after, "<h2>B</h2>") {
+		t.Errorf("after should begin at the next heading: %q", after)
+	}
 }

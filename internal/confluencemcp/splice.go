@@ -9,13 +9,18 @@ const (
 	// ModeEnd inserts the fragment at the end of the body, inside the innermost
 	// trailing ac:layout-cell if present.
 	ModeEnd Mode = iota
-	// ModeAfterHeading inserts the fragment immediately after a named heading's
-	// closing tag.
+	// ModeAfterHeading inserts the fragment at the TOP of a named section:
+	// immediately after the heading's closing tag, directly beneath the
+	// heading and ABOVE the section's existing content.
 	ModeAfterHeading
 	// ModeReplaceSection replaces the content under a named heading (exclusive of
 	// the heading itself) up to the next same-or-higher-level heading or the end
 	// of the containing layout-cell.
 	ModeReplaceSection
+	// ModeEndOfSection inserts the fragment at the END of a named section:
+	// after the section's existing content, before the next
+	// same-or-higher-level heading or the close of the containing layout-cell.
+	ModeEndOfSection
 )
 
 // SpliceOptions configures a Splice call.
@@ -28,7 +33,8 @@ type SpliceOptions struct {
 // was removed. Fields are populated per mode; unused fields are left zero.
 // JSON tags match the preview shape documented in the append design doc.
 type BoundaryInfo struct {
-	// InsertAnchor is populated for ModeEnd and ModeAfterHeading.
+	// InsertAnchor is populated for ModeEnd, ModeAfterHeading, and
+	// ModeEndOfSection.
 	InsertAnchor string `json:"insert_anchor,omitempty"`
 	// StartAnchor and EndAnchor describe the replaced range for ModeReplaceSection.
 	StartAnchor string `json:"start_anchor,omitempty"`
@@ -70,6 +76,8 @@ func Splice(body, fragment string, opts SpliceOptions) (SpliceResult, error) {
 		return spliceAfterHeading(body, fragment, opts.Heading)
 	case ModeReplaceSection:
 		return spliceReplaceSection(body, fragment, opts.Heading)
+	case ModeEndOfSection:
+		return spliceEndOfSection(body, fragment, opts.Heading)
 	default:
 		return SpliceResult{}, ErrNotImplemented
 	}
