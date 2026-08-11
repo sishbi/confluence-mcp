@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.9](https://github.com/sishbi/confluence-mcp/compare/v0.0.8...v0.0.9) (2026-08-11)
+
+
+### Features
+
+* add end_of_section append position ([#24](https://github.com/sishbi/confluence-mcp/issues/24)) ([4999138](https://github.com/sishbi/confluence-mcp/commit/4999138f45523c61504c564fe7f8bda2b96607d3))
+
 ## [0.0.8](https://github.com/sishbi/confluence-mcp/compare/v0.0.7...v0.0.8) (2026-04-21)
 
 
