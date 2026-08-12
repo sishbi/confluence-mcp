@@ -197,7 +197,15 @@ func buildQuery(opts *ListOptions) string {
 		parts = append(parts, "limit="+strconv.Itoa(opts.Limit))
 	}
 	if opts.Cursor != "" {
+		// Cursor arrives pre-encoded from _links.next (see extractCursor);
+		// re-escaping it here would double-encode and break pagination.
 		parts = append(parts, "cursor="+opts.Cursor)
+	}
+	if opts.BodyFormat != "" {
+		parts = append(parts, "body-format="+url.QueryEscape(opts.BodyFormat))
+	}
+	for _, status := range opts.ResolutionStatus {
+		parts = append(parts, "resolution-status="+url.QueryEscape(status))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -214,28 +222,58 @@ func jsonBody(v any) (io.Reader, error) {
 	return bytes.NewReader(b), nil
 }
 
+// extractCursor pulls the bare cursor token out of a relative "_links.next"
+// URL, e.g. "/wiki/api/v2/spaces?cursor=abc&limit=10" -> "abc". Returns ""
+// when next is empty or has no cursor param.
+func extractCursor(next string) string {
+	if next == "" {
+		return ""
+	}
+	idx := strings.Index(next, "?")
+	if idx < 0 {
+		return ""
+	}
+	query := next[idx+1:]
+	for _, pair := range strings.Split(query, "&") {
+		key, value, found := strings.Cut(pair, "=")
+		if found && key == "cursor" {
+			return value
+		}
+	}
+	return ""
+}
+
+// listPaginated performs a GET against path with opts applied as a query
+// string, decodes a PaginatedResponse[T], and returns the results plus the
+// bare cursor token extracted from "_links.next" (never the raw relative
+// URL). Package-level because Go does not allow type parameters on methods.
+func listPaginated[T any](ctx context.Context, c *Client, path string, opts *ListOptions) ([]T, string, error) {
+	fullPath := path + buildQuery(opts)
+	var result PaginatedResponse[T]
+	if err := c.doJSON(ctx, http.MethodGet, fullPath, nil, &result); err != nil {
+		return nil, "", err
+	}
+	return result.Results, extractCursor(result.Links.Next), nil
+}
+
+// withBodyFormatStorage returns a copy of opts with BodyFormat defaulted to
+// "storage" when the caller left it empty. It never mutates the caller's
+// ListOptions.
+func withBodyFormatStorage(opts *ListOptions) *ListOptions {
+	var o ListOptions
+	if opts != nil {
+		o = *opts
+	}
+	if o.BodyFormat == "" {
+		o.BodyFormat = "storage"
+	}
+	return &o
+}
+
 // GetSpaces returns a page of spaces.
 // Returns (spaces, nextCursor, error).
 func (c *Client) GetSpaces(ctx context.Context, opts *ListOptions) ([]Space, string, error) {
-	path := "/wiki/api/v2/spaces" + buildQuery(opts)
-	var result PaginatedResponse[Space]
-	if err := c.doJSON(ctx, http.MethodGet, path, nil, &result); err != nil {
-		return nil, "", err
-	}
-	// Extract cursor from _links.next if present.
-	next := ""
-	if result.Links.Next != "" {
-		// next is a relative URL; extract the cursor param.
-		if idx := strings.Index(result.Links.Next, "cursor="); idx >= 0 {
-			tail := result.Links.Next[idx+7:]
-			if end := strings.Index(tail, "&"); end >= 0 {
-				next = tail[:end]
-			} else {
-				next = tail
-			}
-		}
-	}
-	return result.Results, next, nil
+	return listPaginated[Space](ctx, c, "/wiki/api/v2/spaces", opts)
 }
 
 // BaseURL returns the Confluence host URL (without trailing slash) that the
@@ -268,6 +306,11 @@ func (c *Client) GetPage(ctx context.Context, id string) (*Page, error) {
 
 // GetPageChildren returns the child pages of a page.
 // Returns (children, nextCursor, error).
+//
+// Known follow-up: nextCursor is the raw relative "_links.next" URL, not the
+// extracted cursor token (see extractCursor). Out of scope for the comment
+// threading feature that introduced extractCursor; migrate this alongside
+// GetPageLabels in a follow-up.
 func (c *Client) GetPageChildren(ctx context.Context, id string, opts *ListOptions) ([]Page, string, error) {
 	path := fmt.Sprintf("/wiki/api/v2/pages/%s/children", id) + buildQuery(opts)
 	var result PaginatedResponse[Page]
@@ -326,31 +369,66 @@ func (c *Client) SearchContent(ctx context.Context, cql string, opts *ListOption
 	return &result, nil
 }
 
-// GetPageComments returns the footer comments for a page.
+// GetPageFooterComments returns the footer comments for a page.
 // Returns (comments, nextCursor, error).
-func (c *Client) GetPageComments(ctx context.Context, pageID string, opts *ListOptions) ([]Comment, string, error) {
-	path := fmt.Sprintf("/wiki/api/v2/pages/%s/footer-comments?body-format=storage", pageID)
-	if q := buildQuery(opts); q != "" {
-		path += "&" + q[1:] // strip leading '?' from buildQuery
-	}
-	var result PaginatedResponse[Comment]
-	if err := c.doJSON(ctx, http.MethodGet, path, nil, &result); err != nil {
-		return nil, "", err
-	}
-	return result.Results, result.Links.Next, nil
+func (c *Client) GetPageFooterComments(ctx context.Context, pageID string, opts *ListOptions) ([]Comment, string, error) {
+	path := fmt.Sprintf("/wiki/api/v2/pages/%s/footer-comments", pageID)
+	return listPaginated[Comment](ctx, c, path, withBodyFormatStorage(opts))
 }
 
-// GetComment returns a single footer comment by ID, including its storage-format body.
-func (c *Client) GetComment(ctx context.Context, commentID string) (*Comment, error) {
+// GetPageInlineComments returns the inline comments for a page.
+// Returns (comments, nextCursor, error).
+func (c *Client) GetPageInlineComments(ctx context.Context, pageID string, opts *ListOptions) ([]InlineComment, string, error) {
+	path := fmt.Sprintf("/wiki/api/v2/pages/%s/inline-comments", pageID)
+	return listPaginated[InlineComment](ctx, c, path, withBodyFormatStorage(opts))
+}
+
+// GetFooterCommentChildren returns the reply children of a footer comment.
+// The children endpoints accept no resolution-status filter, so any
+// ResolutionStatus set on opts is dropped before the request.
+// Returns (children, nextCursor, error).
+func (c *Client) GetFooterCommentChildren(ctx context.Context, commentID string, opts *ListOptions) ([]Comment, string, error) {
+	o := withBodyFormatStorage(opts)
+	o.ResolutionStatus = nil
+	path := fmt.Sprintf("/wiki/api/v2/footer-comments/%s/children", commentID)
+	return listPaginated[Comment](ctx, c, path, o)
+}
+
+// GetInlineCommentChildren returns the reply children of an inline comment.
+// The children endpoints accept no resolution-status filter, so any
+// ResolutionStatus set on opts is dropped before the request.
+// Returns (children, nextCursor, error).
+func (c *Client) GetInlineCommentChildren(ctx context.Context, commentID string, opts *ListOptions) ([]InlineComment, string, error) {
+	o := withBodyFormatStorage(opts)
+	o.ResolutionStatus = nil
+	path := fmt.Sprintf("/wiki/api/v2/inline-comments/%s/children", commentID)
+	return listPaginated[InlineComment](ctx, c, path, o)
+}
+
+// GetFooterComment returns a single footer comment by ID, including its storage-format body.
+func (c *Client) GetFooterComment(ctx context.Context, commentID string) (*Comment, error) {
 	var comment Comment
 	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/wiki/api/v2/footer-comments/%s?body-format=storage", commentID), nil, &comment)
 	return &comment, err
 }
 
-// AddComment adds a footer comment to a page.
-func (c *Client) AddComment(ctx context.Context, pageID string, storageBody string) (*Comment, error) {
+// GetInlineComment returns a single inline comment by ID, including its storage-format body.
+func (c *Client) GetInlineComment(ctx context.Context, commentID string) (*InlineComment, error) {
+	var comment InlineComment
+	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/wiki/api/v2/inline-comments/%s?body-format=storage", commentID), nil, &comment)
+	return &comment, err
+}
+
+// createComment POSTs a new footer or inline comment to endpoint. The
+// payload carries exactly one identity key (identKey/identValue) alongside
+// the storage-format body — "pageId" for a top-level comment, or
+// "parentCommentId" for a reply. Confluence rejects a payload that carries
+// both pageId and parentCommentId; since only one key can ever be set here,
+// that is enforced by construction. Each caller below picks the key that
+// applies to it.
+func (c *Client) createComment(ctx context.Context, endpoint, identKey, identValue, storageBody string, out any) error {
 	payload := map[string]any{
-		"pageId": pageID,
+		identKey: identValue,
 		"body": map[string]any{
 			"representation": "storage",
 			"value":          storageBody,
@@ -358,10 +436,33 @@ func (c *Client) AddComment(ctx context.Context, pageID string, storageBody stri
 	}
 	body, err := jsonBody(payload)
 	if err != nil {
+		return err
+	}
+	return c.doJSON(ctx, http.MethodPost, endpoint, body, out)
+}
+
+// AddComment adds a top-level footer comment to a page.
+func (c *Client) AddComment(ctx context.Context, pageID string, storageBody string) (*Comment, error) {
+	var comment Comment
+	if err := c.createComment(ctx, "/wiki/api/v2/footer-comments", "pageId", pageID, storageBody, &comment); err != nil {
 		return nil, err
 	}
+	return &comment, nil
+}
+
+// AddFooterCommentReply adds a reply to an existing footer comment; see createComment for why pageId is not sent.
+func (c *Client) AddFooterCommentReply(ctx context.Context, parentCommentID string, storageBody string) (*Comment, error) {
 	var comment Comment
-	if err := c.doJSON(ctx, http.MethodPost, "/wiki/api/v2/footer-comments", body, &comment); err != nil {
+	if err := c.createComment(ctx, "/wiki/api/v2/footer-comments", "parentCommentId", parentCommentID, storageBody, &comment); err != nil {
+		return nil, err
+	}
+	return &comment, nil
+}
+
+// AddInlineCommentReply adds a reply to an existing inline comment; see createComment for why pageId is not sent.
+func (c *Client) AddInlineCommentReply(ctx context.Context, parentCommentID string, storageBody string) (*InlineComment, error) {
+	var comment InlineComment
+	if err := c.createComment(ctx, "/wiki/api/v2/inline-comments", "parentCommentId", parentCommentID, storageBody, &comment); err != nil {
 		return nil, err
 	}
 	return &comment, nil
@@ -389,6 +490,11 @@ func (c *Client) UpdateComment(ctx context.Context, commentID string, storageBod
 
 // GetPageLabels returns the labels for a page.
 // Returns (labels, nextCursor, error).
+//
+// Known follow-up: nextCursor is the raw relative "_links.next" URL, not the
+// extracted cursor token (see extractCursor). Out of scope for the comment
+// threading feature that introduced extractCursor; migrate this alongside
+// GetPageChildren in a follow-up.
 func (c *Client) GetPageLabels(ctx context.Context, pageID string, opts *ListOptions) ([]Label, string, error) {
 	path := fmt.Sprintf("/wiki/api/v2/pages/%s/labels", pageID) + buildQuery(opts)
 	var result PaginatedResponse[Label]

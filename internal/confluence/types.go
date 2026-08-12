@@ -47,6 +47,20 @@ type CommentVersion struct {
 	Created time.Time `json:"createdAt"`
 }
 
+type InlineComment struct {
+	ID               string                  `json:"id"`
+	Body             PageBody                `json:"body"`
+	PageID           string                  `json:"pageId"`
+	Version          CommentVersion          `json:"version"`
+	ResolutionStatus string                  `json:"resolutionStatus"`
+	Properties       InlineCommentProperties `json:"properties"`
+}
+
+type InlineCommentProperties struct {
+	InlineMarkerRef         string `json:"inlineMarkerRef"`
+	InlineOriginalSelection string `json:"inlineOriginalSelection"`
+}
+
 type Label struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
@@ -88,6 +102,17 @@ type SearchContent struct {
 }
 
 type ListOptions struct {
-	Limit  int
-	Cursor string
+	Limit            int
+	Cursor           string
+	BodyFormat       string
+	ResolutionStatus []string
 }
+
+// Resolution status values for inline comment filtering, per the Confluence
+// v2 OpenAPI spec. This is the complete enum — do not invent others.
+const (
+	ResolutionOpen     = "open"
+	ResolutionResolved = "resolved"
+	ResolutionDangling = "dangling"
+	ResolutionReopened = "reopened"
+)

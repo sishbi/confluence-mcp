@@ -3,6 +3,7 @@ package confluencemcp
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -159,7 +160,7 @@ func TestHandleRead_URLWithCommentID_PageNotCached(t *testing.T) {
 					Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Page content</p>"}},
 				}, nil
 			},
-			GetCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
+			GetFooterCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
 				return &confluence.Comment{
 					ID:   "456",
 					Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Comment text</p>"}},
@@ -181,7 +182,7 @@ func TestHandleRead_URLWithCommentID_PageCached(t *testing.T) {
 	h := &handlers{
 		client: &mockClient{
 			// GetPageFn intentionally NOT set — should not be called
-			GetCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
+			GetFooterCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
 				return &confluence.Comment{
 					ID:   "456",
 					Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Comment text</p>"}},
@@ -199,6 +200,175 @@ func TestHandleRead_URLWithCommentID_PageCached(t *testing.T) {
 	// Only comment should be present (page was cached, not re-fetched)
 	assert.Contains(t, text, "Comment text")
 	assert.NotContains(t, text, "Cached page")
+}
+
+// TestHandleRead_FocusedInlineComment covers D7: a focusedCommentId permalink
+// to an inline comment 404s against GetFooterComment (footer-only), so
+// readByURL must fall back to GetInlineComment and label the resolved type.
+func TestHandleRead_FocusedInlineComment(t *testing.T) {
+	notFound := &confluence.APIError{StatusCode: 404, Body: "not found"}
+
+	t.Run("footer 404s, inline succeeds, page not cached", func(t *testing.T) {
+		h := &handlers{
+			client: &mockClient{
+				GetFooterCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
+					// Real client always returns a non-nil pointer alongside
+					// the error — the fallback must branch on err, not on
+					// comment != nil.
+					return &confluence.Comment{}, notFound
+				},
+				GetInlineCommentFn: func(ctx context.Context, commentID string) (*confluence.InlineComment, error) {
+					assert.Equal(t, "456", commentID)
+					return &confluence.InlineComment{
+						ID:   "456",
+						Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Inline comment text</p>"}},
+					}, nil
+				},
+				GetPageFn: func(ctx context.Context, id string) (*confluence.Page, error) {
+					return &confluence.Page{
+						ID:    "123",
+						Title: "Test Page",
+						Body:  confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Page content</p>"}},
+					}, nil
+				},
+			},
+		}
+
+		args := ReadArgs{URL: "https://company.atlassian.net/wiki/spaces/DEV/pages/123/Title?focusedCommentId=456"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		text := firstText(t, result)
+		assert.Contains(t, text, "Inline comment text")
+		assert.Contains(t, text, "(type: inline)")
+		assert.Contains(t, text, "**Comment ID:** 456  (type: inline)")
+		assert.Contains(t, text, "Page content")
+	})
+
+	t.Run("footer 404s, inline succeeds, page cached", func(t *testing.T) {
+		h := &handlers{
+			client: &mockClient{
+				// GetPageFn intentionally NOT set — must not be called.
+				GetFooterCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
+					return &confluence.Comment{}, notFound
+				},
+				GetInlineCommentFn: func(ctx context.Context, commentID string) (*confluence.InlineComment, error) {
+					return &confluence.InlineComment{
+						ID:   "456",
+						Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Inline comment text</p>"}},
+					}, nil
+				},
+			},
+		}
+		h.cache.put(&cachedPage{pageID: "123", markdown: "# Cached page", fetchedAt: time.Now()})
+
+		args := ReadArgs{URL: "https://company.atlassian.net/wiki/spaces/DEV/pages/123/Title?focusedCommentId=456"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		text := firstText(t, result)
+		assert.Contains(t, text, "Inline comment text")
+		assert.Contains(t, text, "(type: inline)")
+		assert.NotContains(t, text, "Cached page")
+	})
+
+	t.Run("footer succeeds — inline arm never called", func(t *testing.T) {
+		inlineCalls := 0
+		h := &handlers{
+			client: &mockClient{
+				GetFooterCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
+					return &confluence.Comment{
+						ID:   "456",
+						Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Footer comment text</p>"}},
+					}, nil
+				},
+				GetInlineCommentFn: func(ctx context.Context, commentID string) (*confluence.InlineComment, error) {
+					inlineCalls++
+					return &confluence.InlineComment{}, nil
+				},
+			},
+		}
+		h.cache.put(&cachedPage{pageID: "123", markdown: "# Cached page", fetchedAt: time.Now()})
+
+		args := ReadArgs{URL: "https://company.atlassian.net/wiki/spaces/DEV/pages/123/Title?focusedCommentId=456"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		text := firstText(t, result)
+		assert.Contains(t, text, "Footer comment text")
+		assert.Contains(t, text, "(type: footer)")
+		assert.Equal(t, 0, inlineCalls, "footer success must not trigger the inline fallback")
+	})
+
+	t.Run("footer 500 does not fall back to inline", func(t *testing.T) {
+		serverErr := &confluence.APIError{StatusCode: 500, Body: "boom"}
+		inlineCalls := 0
+		h := &handlers{
+			client: &mockClient{
+				GetFooterCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
+					return &confluence.Comment{}, serverErr
+				},
+				GetInlineCommentFn: func(ctx context.Context, commentID string) (*confluence.InlineComment, error) {
+					inlineCalls++
+					return &confluence.InlineComment{}, nil
+				},
+			},
+		}
+
+		args := ReadArgs{URL: "https://company.atlassian.net/wiki/spaces/DEV/pages/123/Title?focusedCommentId=456"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		text := firstText(t, result)
+		assert.Contains(t, text, "456")
+		assert.Contains(t, text, serverErr.Error())
+		assert.Equal(t, 0, inlineCalls, "a non-404 footer error must not trigger the inline fallback")
+	})
+
+	t.Run("both footer and inline fail — one clear error naming the comment ID", func(t *testing.T) {
+		h := &handlers{
+			client: &mockClient{
+				GetFooterCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
+					return &confluence.Comment{}, notFound
+				},
+				GetInlineCommentFn: func(ctx context.Context, commentID string) (*confluence.InlineComment, error) {
+					return &confluence.InlineComment{}, notFound
+				},
+			},
+		}
+
+		args := ReadArgs{URL: "https://company.atlassian.net/wiki/spaces/DEV/pages/123/Title?focusedCommentId=456"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		text := firstText(t, result)
+		assert.Contains(t, text, "456")
+		assert.Equal(t, 1, strings.Count(text, "456"), "the failure must surface as one clear error, not two stacked errors")
+		assert.NotContains(t, text, "confluence API error 404", "a bare 404 must not leak through when both fetches fail")
+	})
+
+	t.Run("footer 404s, inline 500s — the inline failure is surfaced, not a false \"not found\"", func(t *testing.T) {
+		inlineServerErr := &confluence.APIError{StatusCode: 500, Body: "boom"}
+		h := &handlers{
+			client: &mockClient{
+				GetFooterCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
+					return &confluence.Comment{}, notFound
+				},
+				GetInlineCommentFn: func(ctx context.Context, commentID string) (*confluence.InlineComment, error) {
+					return &confluence.InlineComment{}, inlineServerErr
+				},
+			},
+		}
+
+		args := ReadArgs{URL: "https://company.atlassian.net/wiki/spaces/DEV/pages/123/Title?focusedCommentId=456"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		text := firstText(t, result)
+		assert.Contains(t, text, inlineServerErr.Error(), "the underlying inline failure must be visible, not swallowed")
+		assert.NotContains(t, text, "not found as footer or inline comment",
+			"a non-404 inline failure must not be misreported as the comment not existing")
+	})
 }
 
 func TestHandleRead_SearchCQL(t *testing.T) {
@@ -341,12 +511,20 @@ func TestHandleRead_ListChildren_MissingPageID(t *testing.T) {
 func TestHandleRead_ListComments(t *testing.T) {
 	h := &handlers{
 		client: &mockClient{
-			GetPageCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+			GetPageFooterCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
 				assert.Equal(t, "123", pageID)
 				return []confluence.Comment{
 					{ID: "c1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>First comment</p>"}}},
 					{ID: "c2", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Second comment</p>"}}},
 				}, "", nil
+			},
+			GetFooterCommentChildrenFn: func(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+				if commentID == "c1" {
+					return []confluence.Comment{
+						{ID: "c1-r1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>A reply</p>"}}},
+					}, "", nil
+				}
+				return nil, "", nil
 			},
 		},
 	}
@@ -358,7 +536,103 @@ func TestHandleRead_ListComments(t *testing.T) {
 	text := firstText(t, result)
 	assert.Contains(t, text, "First comment")
 	assert.Contains(t, text, "Second comment")
-	assert.Contains(t, text, "c1")
+	assert.Contains(t, text, "(type: footer)")
+	assert.Contains(t, text, "**Comment ID:** c1  (type: footer)")
+	assert.Contains(t, text, "A reply")
+	assert.Contains(t, text, "  **Reply ID:** c1-r1", "reply must be indented two spaces under its parent thread")
+	assert.NotContains(t, text, "**Status:**")
+}
+
+func TestHandleRead_ListComments_CapsChildFetches(t *testing.T) {
+	const totalThreads = maxChildFetchThreads + 3
+	var comments []confluence.Comment
+	for i := 0; i < totalThreads; i++ {
+		comments = append(comments, confluence.Comment{
+			ID:   fmt.Sprintf("c%d", i),
+			Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>body</p>"}},
+		})
+	}
+
+	childFetchCalls := 0
+	h := &handlers{
+		client: &mockClient{
+			GetPageFooterCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+				return comments, "", nil
+			},
+			GetFooterCommentChildrenFn: func(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+				childFetchCalls++
+				return nil, "", nil
+			},
+		},
+	}
+
+	args := ReadArgs{Resource: "comments", PageID: "123"}
+	result, _, err := h.handleRead(context.Background(), nil, args)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	text := firstText(t, result)
+	assert.Equal(t, maxChildFetchThreads, childFetchCalls, "child fetches must stop at the cap, same as inline_comments")
+	assert.Contains(t, text, "with a smaller `limit` to see the rest",
+		"footer truncation notice must point at limit alone, not the inline-only resolution_status filter")
+	assert.Contains(t, text, fmt.Sprintf("past the per-read cap of %d", maxChildFetchThreads),
+		"a thread past the cap must carry its own notice — otherwise it is indistinguishable from a thread with no replies")
+}
+
+func TestHandleRead_ListComments_ChildFetchError_DegradesGracefully(t *testing.T) {
+	h := &handlers{
+		client: &mockClient{
+			GetPageFooterCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+				return []confluence.Comment{
+					{ID: "c1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>First thread</p>"}}},
+					{ID: "c2", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Second thread</p>"}}},
+				}, "", nil
+			},
+			GetFooterCommentChildrenFn: func(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+				if commentID == "c1" {
+					return nil, "", assert.AnError
+				}
+				return []confluence.Comment{
+					{ID: "c2-r1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Second reply</p>"}}},
+				}, "", nil
+			},
+		},
+	}
+
+	args := ReadArgs{Resource: "comments", PageID: "123"}
+	result, _, err := h.handleRead(context.Background(), nil, args)
+	require.NoError(t, err)
+	require.False(t, result.IsError, "a single thread's child-fetch error must not fail the whole read")
+	text := firstText(t, result)
+	assert.Contains(t, text, "First thread", "the failing thread's own parent comment must still render")
+	assert.Contains(t, text, "Second thread")
+	assert.Contains(t, text, "Second reply", "an unaffected thread's replies must still render")
+	assert.Contains(t, text, "*Replies could not be loaded: "+assert.AnError.Error()+"*",
+		"the failing thread must carry a clear per-thread notice naming the reason")
+}
+
+func TestHandleRead_ListComments_ChildCursorNonEmpty_EmitsPerThreadNotice(t *testing.T) {
+	h := &handlers{
+		client: &mockClient{
+			GetPageFooterCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+				return []confluence.Comment{
+					{ID: "c1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Body</p>"}}},
+				}, "", nil
+			},
+			GetFooterCommentChildrenFn: func(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+				return []confluence.Comment{
+					{ID: "r1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Reply</p>"}}},
+				}, "more-replies-cursor", nil
+			},
+		},
+	}
+
+	args := ReadArgs{Resource: "comments", PageID: "123"}
+	result, _, err := h.handleRead(context.Background(), nil, args)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	text := firstText(t, result)
+	assert.Contains(t, text, fmt.Sprintf("more than %d replies", maxRepliesPerThread),
+		"a non-empty child cursor must not be silently discarded")
 }
 
 func TestHandleRead_ListComments_ResolvesUserMentionsOnce(t *testing.T) {
@@ -370,11 +644,14 @@ func TestHandleRead_ListComments_ResolvesUserMentionsOnce(t *testing.T) {
 				getUserCalls++
 				return &confluence.User{AccountID: accountID, DisplayName: "Alice"}, nil
 			},
-			GetPageCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+			GetPageFooterCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
 				return []confluence.Comment{
 					{ID: "c1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Ping " + mention + "</p>"}}},
 					{ID: "c2", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Again " + mention + "</p>"}}},
 				}, "", nil
+			},
+			GetFooterCommentChildrenFn: func(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+				return nil, "", nil
 			},
 		},
 	}
@@ -397,7 +674,7 @@ func TestHandleRead_ByURL_CommentResolvesUserMention(t *testing.T) {
 			GetUserFn: func(ctx context.Context, accountID string) (*confluence.User, error) {
 				return &confluence.User{AccountID: accountID, DisplayName: "Bob"}, nil
 			},
-			GetCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
+			GetFooterCommentFn: func(ctx context.Context, commentID string) (*confluence.Comment, error) {
 				return &confluence.Comment{ID: commentID, Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Hi " + mention + "</p>"}}}, nil
 			},
 		},
@@ -426,6 +703,208 @@ func TestHandleRead_ListComments_MissingPageID(t *testing.T) {
 	assert.Contains(t, firstText(t, result), "page_id")
 }
 
+func TestHandleRead_ListInlineComments(t *testing.T) {
+	t.Run("renders thread with status, selection, type label, and nested reply", func(t *testing.T) {
+		h := &handlers{
+			client: &mockClient{
+				GetPageInlineCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+					assert.Equal(t, "123", pageID)
+					return []confluence.InlineComment{
+						{
+							ID:               "4808802349",
+							Body:             confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Inline body</p>"}},
+							ResolutionStatus: confluence.ResolutionOpen,
+							Properties:       confluence.InlineCommentProperties{InlineOriginalSelection: "the highlighted source text"},
+						},
+					}, "", nil
+				},
+				GetInlineCommentChildrenFn: func(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+					assert.Equal(t, "4808802349", commentID)
+					return []confluence.InlineComment{
+						{ID: "4808802350", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Reply body</p>"}}},
+					}, "", nil
+				},
+			},
+		}
+
+		args := ReadArgs{Resource: "inline_comments", PageID: "123"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		text := firstText(t, result)
+		assert.Contains(t, text, "the highlighted source text")
+		assert.Contains(t, text, "**Status:** open")
+		assert.Contains(t, text, "(type: inline)")
+		assert.Contains(t, text, "4808802349")
+		assert.Contains(t, text, "**Comment ID:** 4808802349  (type: inline)")
+		assert.Contains(t, text, "Reply body")
+		assert.Contains(t, text, "  **Reply ID:** 4808802350", "reply must be indented two spaces under its parent thread")
+	})
+
+	t.Run("resolution_status reaches the client", func(t *testing.T) {
+		var received []string
+		h := &handlers{
+			client: &mockClient{
+				GetPageInlineCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+					received = opts.ResolutionStatus
+					return nil, "", nil
+				},
+			},
+		}
+
+		args := ReadArgs{
+			Resource:         "inline_comments",
+			PageID:           "123",
+			ResolutionStatus: []string{confluence.ResolutionOpen, confluence.ResolutionReopened},
+		}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		assert.Equal(t, []string{confluence.ResolutionOpen, confluence.ResolutionReopened}, received)
+	})
+
+	t.Run("rejects unknown resolution_status value", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+
+		args := ReadArgs{Resource: "inline_comments", PageID: "123", ResolutionStatus: []string{"bogus"}}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		text := firstText(t, result)
+		assert.Contains(t, text, "bogus")
+		assert.Contains(t, text, confluence.ResolutionOpen)
+		assert.Contains(t, text, confluence.ResolutionResolved)
+		assert.Contains(t, text, confluence.ResolutionDangling)
+		assert.Contains(t, text, confluence.ResolutionReopened)
+	})
+
+	t.Run("caps child fetches at the threshold and reports truncation", func(t *testing.T) {
+		const totalThreads = maxChildFetchThreads + 3
+		var comments []confluence.InlineComment
+		for i := 0; i < totalThreads; i++ {
+			comments = append(comments, confluence.InlineComment{
+				ID:   fmt.Sprintf("c%d", i),
+				Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>body</p>"}},
+			})
+		}
+
+		childFetchCalls := 0
+		h := &handlers{
+			client: &mockClient{
+				GetPageInlineCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+					return comments, "", nil
+				},
+				GetInlineCommentChildrenFn: func(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+					childFetchCalls++
+					return nil, "", nil
+				},
+			},
+		}
+
+		args := ReadArgs{Resource: "inline_comments", PageID: "123"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		text := firstText(t, result)
+		assert.Equal(t, maxChildFetchThreads, childFetchCalls, "child fetches must stop at the cap")
+		assert.Contains(t, text, "narrower `resolution_status`",
+			"inline truncation notice must point at resolution_status, not the footer-only limit wording")
+		assert.Contains(t, text, fmt.Sprintf("past the per-read cap of %d", maxChildFetchThreads),
+			"a thread past the cap must carry its own notice — otherwise it is indistinguishable from a thread with no replies")
+	})
+
+	t.Run("a child-fetch error on one thread degrades gracefully instead of failing the read", func(t *testing.T) {
+		h := &handlers{
+			client: &mockClient{
+				GetPageInlineCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+					return []confluence.InlineComment{
+						{ID: "c1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>First thread</p>"}}},
+						{ID: "c2", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Second thread</p>"}}},
+					}, "", nil
+				},
+				GetInlineCommentChildrenFn: func(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+					if commentID == "c1" {
+						return nil, "", assert.AnError
+					}
+					return []confluence.InlineComment{
+						{ID: "c2-r1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Second reply</p>"}}},
+					}, "", nil
+				},
+			},
+		}
+
+		args := ReadArgs{Resource: "inline_comments", PageID: "123"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError, "a single thread's child-fetch error must not fail the whole read")
+		text := firstText(t, result)
+		assert.Contains(t, text, "First thread", "the failing thread's own parent comment must still render")
+		assert.Contains(t, text, "Second thread")
+		assert.Contains(t, text, "Second reply", "an unaffected thread's replies must still render")
+		assert.Contains(t, text, "*Replies could not be loaded: "+assert.AnError.Error()+"*",
+			"the failing thread must carry a clear per-thread notice naming the reason")
+	})
+
+	t.Run("a non-empty child cursor emits a per-thread notice instead of being silently discarded", func(t *testing.T) {
+		h := &handlers{
+			client: &mockClient{
+				GetPageInlineCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+					return []confluence.InlineComment{
+						{ID: "c1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Body</p>"}}},
+					}, "", nil
+				},
+				GetInlineCommentChildrenFn: func(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+					return []confluence.InlineComment{
+						{ID: "r1", Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Reply</p>"}}},
+					}, "more-replies-cursor", nil
+				},
+			},
+		}
+
+		args := ReadArgs{Resource: "inline_comments", PageID: "123"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		text := firstText(t, result)
+		assert.Contains(t, text, fmt.Sprintf("more than %d replies", maxRepliesPerThread))
+	})
+
+	t.Run("continuation hint quotes resolution_status as a valid JSON array", func(t *testing.T) {
+		h := &handlers{
+			client: &mockClient{
+				GetPageInlineCommentsFn: func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+					return nil, "cursor-abc", nil
+				},
+			},
+		}
+
+		args := ReadArgs{
+			Resource:         "inline_comments",
+			PageID:           "123",
+			ResolutionStatus: []string{"open", "reopened"},
+		}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		text := firstText(t, result)
+
+		const wantHint = "\n*More inline comments available — pass `next_page_token: \"cursor-abc\"` " +
+			"with `resource: \"inline_comments\"` and `page_id: \"123\"` " +
+			"and `resolution_status: [\"open\",\"reopened\"]` to continue.*"
+		assert.Contains(t, text, wantHint, "hint must echo resolution_status as valid JSON, not Go's %%v slice syntax")
+	})
+}
+
+func TestHandleRead_ListInlineComments_MissingPageID(t *testing.T) {
+	h := &handlers{client: &mockClient{}}
+
+	args := ReadArgs{Resource: "inline_comments"}
+	result, _, err := h.handleRead(context.Background(), nil, args)
+	assert.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, firstText(t, result), "page_id")
+}
+
 func TestHandleRead_ListLabels(t *testing.T) {
 	h := &handlers{
 		client: &mockClient{
@@ -448,6 +927,33 @@ func TestHandleRead_ListLabels(t *testing.T) {
 	assert.Contains(t, text, "reviewed")
 }
 
+func TestHandleRead_ResolutionStatus_RejectedOnNonInlineResources(t *testing.T) {
+	// spaces takes no page_id, unlike the other three resources.
+	cases := []struct {
+		resource string
+		pageID   string
+	}{
+		{resource: "spaces"},
+		{resource: "comments", pageID: "123"},
+		{resource: "children", pageID: "123"},
+		{resource: "labels", pageID: "123"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.resource, func(t *testing.T) {
+			h := &handlers{client: &mockClient{}}
+
+			args := ReadArgs{Resource: tc.resource, PageID: tc.pageID, ResolutionStatus: []string{"open"}}
+			result, _, err := h.handleRead(context.Background(), nil, args)
+			require.NoError(t, err)
+			require.True(t, result.IsError, "resolution_status must be rejected, not silently dropped, on resource=%q", tc.resource)
+			text := firstText(t, result)
+			assert.Contains(t, text, "resolution_status")
+			assert.Contains(t, text, "inline_comments")
+			assert.Contains(t, text, tc.resource)
+		})
+	}
+}
+
 func TestHandleRead_ListLabels_MissingPageID(t *testing.T) {
 	h := &handlers{client: &mockClient{}}
 
@@ -466,6 +972,7 @@ func TestHandleRead_UnknownResource(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, result.IsError)
 	assert.Contains(t, firstText(t, result), "unknown resource")
+	assert.Contains(t, firstText(t, result), "inline_comments")
 }
 
 func TestHandleRead_CacheEvictionOnExpiry(t *testing.T) {
@@ -790,6 +1297,41 @@ func TestChunkToken_Roundtrip(t *testing.T) {
 	decoded, err := decodeChunkToken(token)
 	require.NoError(t, err)
 	assert.Equal(t, orig, decoded)
+}
+
+// TestReadTool_ResolutionStatusValuesMatch guards against the two
+// agent-facing resolution-status strings — the confluence_read tool
+// description's Options: line (server.go) and the ResolutionStatus field's
+// jsonschema tag (tool_read.go) — drifting from resolutionStatusValues, the
+// same duplication class already closed on the write side by
+// TestWriteTool_DescriptionFormatActionNames. Both strings must mention
+// every value in resolutionStatusValues; if a value is added, renamed, or
+// removed there, both strings must be updated too.
+func TestReadTool_ResolutionStatusValuesMatch(t *testing.T) {
+	require.NotEmpty(t, resolutionStatusValues, "resolutionStatusValues must not be empty")
+
+	argsType := reflect.TypeOf(ReadArgs{})
+	var field reflect.StructField
+	found := false
+	for i := 0; i < argsType.NumField(); i++ {
+		f := argsType.Field(i)
+		if strings.Split(f.Tag.Get("json"), ",")[0] == "resolution_status" {
+			field = f
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "no ReadArgs field carries the json tag %q", "resolution_status")
+
+	jsonschemaTag := field.Tag.Get("jsonschema")
+	require.NotEmpty(t, jsonschemaTag, "field %q has no jsonschema tag to check", field.Name)
+
+	for _, v := range resolutionStatusValues {
+		assert.Contains(t, readTool.Description, v,
+			"confluence_read tool description (server.go Options: line) is missing resolution_status value %q", v)
+		assert.Contains(t, jsonschemaTag, v,
+			"ReadArgs.%s jsonschema tag is missing resolution_status value %q", field.Name, v)
+	}
 }
 
 func TestCache_MacroTTL(t *testing.T) {

@@ -3,6 +3,7 @@ package confluencemcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -33,6 +34,14 @@ type WriteItem struct {
 	// required for every position except "end".
 	Position string `json:"position,omitempty"`
 	Heading  string `json:"heading,omitempty"`
+	// ParentCommentID identifies the comment being replied to. Required for
+	// reply_comment; sent as parentCommentId on the wire and never alongside
+	// page_id — Confluence's reply create models reject the two together (D4).
+	ParentCommentID string `json:"parent_comment_id,omitempty"`
+	// CommentType selects which comment API a reply targets, "footer" or
+	// "inline". Required for reply_comment — the two are distinct endpoints
+	// and the type cannot be inferred from the parent ID alone.
+	CommentType string `json:"comment_type,omitempty"`
 }
 
 // WriteArgs holds the arguments for the confluence_write tool.
@@ -42,16 +51,24 @@ type WriteArgs struct {
 	DryRun bool        `json:"dry_run,omitempty"`
 }
 
-var validActions = map[string]bool{
-	"create":       true,
-	"update":       true,
-	"append":       true,
-	"delete":       true,
-	"comment":      true,
-	"edit_comment": true,
-	"add_label":    true,
-	"remove_label": true,
+// writeActionNames lists every write action, in the order presented to
+// callers: the tool description prose (server.go) and the unknown-action
+// error message below. validActions is derived from this slice, so the
+// action list, validActions, and the error string cannot drift from one
+// another; TestValidActionsMatchesPermittedWriteFields (tool_write_test.go)
+// closes the remaining leg by pinning validActions against
+// permittedWriteFields.
+var writeActionNames = []string{
+	"create", "update", "append", "delete", "comment", "edit_comment", "reply_comment", "add_label", "remove_label",
 }
+
+var validActions = func() map[string]bool {
+	m := make(map[string]bool, len(writeActionNames))
+	for _, name := range writeActionNames {
+		m[name] = true
+	}
+	return m
+}()
 
 // handleWrite dispatches write operations for each item.
 func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args WriteArgs) (*mcp.CallToolResult, any, error) {
@@ -59,7 +76,7 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 		return textResult("items must not be empty", true), nil, nil
 	}
 	if !validActions[args.Action] {
-		return textResult(fmt.Sprintf("unknown action %q — use: create, update, append, delete, comment, edit_comment, add_label, remove_label", args.Action), true), nil, nil
+		return textResult(fmt.Sprintf("unknown action %q — use: %s", args.Action, strings.Join(writeActionNames, ", ")), true), nil, nil
 	}
 
 	h.logger().InfoContext(ctx, "write_action",
@@ -93,6 +110,10 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 
 // dispatchWriteItem routes a single item to the appropriate handler method.
 func (h *handlers) dispatchWriteItem(ctx context.Context, action string, item WriteItem, dryRun bool) (string, error) {
+	if err := validateWriteItemFields(action, item); err != nil {
+		return "", err
+	}
+
 	switch action {
 	case "create":
 		return h.writeCreate(ctx, item, dryRun)
@@ -106,6 +127,8 @@ func (h *handlers) dispatchWriteItem(ctx context.Context, action string, item Wr
 		return h.writeComment(ctx, item, dryRun)
 	case "edit_comment":
 		return h.writeEditComment(ctx, item, dryRun)
+	case "reply_comment":
+		return h.writeReplyComment(ctx, item, dryRun)
 	case "add_label":
 		return h.writeAddLabel(ctx, item, dryRun)
 	case "remove_label":
@@ -115,7 +138,106 @@ func (h *handlers) dispatchWriteItem(ctx context.Context, action string, item Wr
 	}
 }
 
+// writeFieldSpec names a WriteItem field by its JSON key and reports whether
+// a given item supplies it.
+type writeFieldSpec struct {
+	name string
+	set  func(WriteItem) bool
+}
+
+// writeFields enumerates every WriteItem field once, in struct-declaration
+// order, so permittedWriteFields below has a single place to name each field.
+var writeFields = []writeFieldSpec{
+	{"space_id", func(i WriteItem) bool { return i.SpaceID != "" }},
+	{"page_id", func(i WriteItem) bool { return i.PageID != "" }},
+	{"title", func(i WriteItem) bool { return i.Title != "" }},
+	{"body", func(i WriteItem) bool { return i.Body != "" }},
+	{"format", func(i WriteItem) bool { return i.Format != "" }},
+	{"parent_id", func(i WriteItem) bool { return i.ParentID != "" }},
+	{"status", func(i WriteItem) bool { return i.Status != "" }},
+	{"version_number", func(i WriteItem) bool { return i.VersionNumber != 0 }},
+	{"comment_id", func(i WriteItem) bool { return i.CommentID != "" }},
+	{"label", func(i WriteItem) bool { return i.Label != "" }},
+	{"position", func(i WriteItem) bool { return i.Position != "" }},
+	{"heading", func(i WriteItem) bool { return i.Heading != "" }},
+	{"parent_comment_id", func(i WriteItem) bool { return i.ParentCommentID != "" }},
+	{"comment_type", func(i WriteItem) bool { return i.CommentType != "" }},
+}
+
+// permittedWriteFields maps each action to the WriteItem fields its handler
+// method actually reads (D6). One struct backs every action and the tool
+// schema is reflected from it, so every field is accepted by every action
+// unless rejected here — that silent acceptance is what let comment_type be
+// dropped on a plain "comment" call in the original mis-post. Each set below
+// was derived by reading the corresponding handler, not copied from another
+// action's set.
+var permittedWriteFields = map[string]map[string]bool{
+	"create":        writeFieldSet("space_id", "title", "body", "format", "parent_id", "status", "page_id"),
+	"update":        writeFieldSet("page_id", "title", "body", "format", "version_number", "status"),
+	"append":        writeFieldSet("page_id", "body", "format", "position", "heading", "version_number"),
+	"delete":        writeFieldSet("page_id"),
+	"comment":       writeFieldSet("page_id", "body"),
+	"edit_comment":  writeFieldSet("comment_id", "body", "version_number"),
+	"reply_comment": writeFieldSet("parent_comment_id", "comment_type", "body", "format"),
+	"add_label":     writeFieldSet("page_id", "label"),
+	"remove_label":  writeFieldSet("page_id", "label"),
+}
+
+func writeFieldSet(names ...string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	return set
+}
+
+// writeFieldHints names, for a rejected field, the field an agent probably
+// meant instead. parent_id (create's field) and parent_comment_id (reply's)
+// are the confusable pair that caused a real mis-post — comment_type was
+// dropped silently instead of erroring.
+var writeFieldHints = map[string]string{
+	"parent_id": "parent_comment_id",
+}
+
+// writeFieldExplanations overrides the generic rejection message for a
+// specific (action, field) pair, keyed "action:field". Use this only when the
+// generic message would be misleading because the field IS a real schema
+// field valid on other actions — "not a valid field" reads as "no such
+// field", which is false for e.g. format on comment (it works on create,
+// update, append, reply_comment). Every other rejection stays generic.
+var writeFieldExplanations = map[string]string{
+	"comment:format":      `format is not supported for action "comment" — comment bodies are always converted from Markdown; raw XHTML in comments is not yet supported`,
+	"edit_comment:format": `format is not supported for action "edit_comment" — comment bodies are always converted from Markdown; raw XHTML in comments is not yet supported`,
+}
+
+// validateWriteItemFields rejects any field an item supplies that its
+// action's handler does not consume. Symmetric by construction: a field is
+// rejected the same way whether it is "one the action never uses" (e.g.
+// comment_type on comment) or "the wrong one of a confusable pair" (e.g.
+// parent_id on reply_comment) — both are the silent-drop defect D6 exists to
+// close, so both are hard errors rather than one being quietly ignored.
+func validateWriteItemFields(action string, item WriteItem) error {
+	permitted := permittedWriteFields[action]
+	for _, f := range writeFields {
+		if !f.set(item) || permitted[f.name] {
+			continue
+		}
+		if explanation, ok := writeFieldExplanations[action+":"+f.name]; ok {
+			return errors.New(explanation)
+		}
+		if hint, ok := writeFieldHints[f.name]; ok {
+			return fmt.Errorf("%s is not a valid field for action %q — did you mean %s?", f.name, action, hint)
+		}
+		return fmt.Errorf("%s is not a valid field for action %q", f.name, action)
+	}
+	return nil
+}
+
 func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool) (string, error) {
+	if item.PageID != "" && (item.Format == "storage" || !reMacroCommentCheck.MatchString(item.Body)) {
+		return "", fmt.Errorf(`page_id is only valid for action "create" when body carries <!-- macro:mN --> sentinels (it names the source page whose macro registry to reuse) — drop it, or use action "update" to modify an existing page`)
+	}
+
 	payload := map[string]any{
 		"spaceId": item.SpaceID,
 		"title":   item.Title,
@@ -258,6 +380,57 @@ func (h *handlers) writeEditComment(ctx context.Context, item WriteItem, dryRun 
 		return "", err
 	}
 	return fmt.Sprintf("Updated comment %s", comment.ID), nil
+}
+
+// writeReplyComment handles the "reply_comment" action: post a reply to an
+// existing footer or inline comment (D1 — replies only, no new anchored
+// inline comments). Body handling is deliberately local rather than shared
+// with writeComment/writeEditComment: those two ignore item.Format and
+// always call mdconv.ToStorageFormat, and folding reply_comment in would
+// also drag in ensureMacroRegistry(ctx, item.PageID) — a reply sends no
+// page_id at all (D4), so that lookup would fire a lookup against an empty
+// page ID for no benefit.
+func (h *handlers) writeReplyComment(ctx context.Context, item WriteItem, dryRun bool) (string, error) {
+	if item.ParentCommentID == "" {
+		return "", fmt.Errorf("parent_comment_id is required for reply_comment")
+	}
+	// Missing and invalid are reported separately: "is required" misdescribes a
+	// value that was supplied but wrong, and the caller's next action differs.
+	if item.CommentType == "" {
+		return "", fmt.Errorf("comment_type is required for reply_comment — use %q or %q", commentFooter, commentInline)
+	}
+	if item.CommentType != string(commentFooter) && item.CommentType != string(commentInline) {
+		return "", fmt.Errorf("invalid comment_type %q for reply_comment — use %q or %q", item.CommentType, commentFooter, commentInline)
+	}
+	if item.Body == "" {
+		return "", fmt.Errorf("body is required for reply_comment")
+	}
+	kind := commentKind(item.CommentType)
+
+	var storageBody string
+	if item.Format == "storage" {
+		storageBody = item.Body
+	} else {
+		storageBody = mdconv.ToStorageFormat(item.Body)
+	}
+
+	if dryRun {
+		return fmt.Sprintf("Would add %s reply to comment %s:\n%s", kind, item.ParentCommentID, storageBody), nil
+	}
+
+	if kind == commentFooter {
+		comment, err := h.client.AddFooterCommentReply(ctx, item.ParentCommentID, storageBody)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Added %s reply %s to comment %s", kind, comment.ID, item.ParentCommentID), nil
+	}
+
+	comment, err := h.client.AddInlineCommentReply(ctx, item.ParentCommentID, storageBody)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Added %s reply %s to comment %s", kind, comment.ID, item.ParentCommentID), nil
 }
 
 func (h *handlers) writeAddLabel(ctx context.Context, item WriteItem, dryRun bool) (string, error) {

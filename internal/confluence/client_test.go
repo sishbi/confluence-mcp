@@ -207,21 +207,241 @@ func TestSearchContent(t *testing.T) {
 	assert.Equal(t, "Found", result.Results[0].Title)
 }
 
-func TestGetPageComments(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/wiki/api/v2/pages/123/footer-comments", r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(PaginatedResponse[Comment]{Results: []Comment{{ID: "c1"}}})
-	}))
-	defer srv.Close()
+func TestGetPageFooterComments(t *testing.T) {
+	tests := []struct {
+		name       string
+		nextLink   string
+		wantCursor string
+	}{
+		{
+			name: "no pagination",
+		},
+		{
+			name:       "cursor extracted from next link, not the raw URL",
+			nextLink:   "/wiki/api/v2/pages/123/footer-comments?limit=25&cursor=nextPageCursor",
+			wantCursor: "nextPageCursor",
+		},
+	}
 
-	c := newTestClient(t, srv.URL)
-	comments, _, err := c.GetPageComments(context.Background(), "123", nil)
-	require.NoError(t, err)
-	assert.Len(t, comments, 1)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/wiki/api/v2/pages/123/footer-comments", r.URL.Path)
+				assert.Contains(t, r.URL.RawQuery, "body-format=storage")
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(PaginatedResponse[Comment]{
+					Results: []Comment{{ID: "c1"}},
+					Links:   Links{Next: tt.nextLink},
+				})
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv.URL)
+			comments, next, err := c.GetPageFooterComments(context.Background(), "123", nil)
+			require.NoError(t, err)
+			assert.Len(t, comments, 1)
+			assert.Equal(t, tt.wantCursor, next)
+		})
+	}
 }
 
-func TestGetComment(t *testing.T) {
+func TestGetPageInlineComments(t *testing.T) {
+	tests := []struct {
+		name           string
+		opts           *ListOptions
+		nextLink       string
+		wantResolution string // expected resolution-status query value; "" means absent
+		wantCursor     string
+	}{
+		{
+			name:       "defaults body-format, no resolution status sent when unset",
+			opts:       nil,
+			nextLink:   "/wiki/api/v2/pages/123/inline-comments?limit=25&cursor=abc123XYZ",
+			wantCursor: "abc123XYZ",
+		},
+		{
+			name:           "resolution status is passed through when set",
+			opts:           &ListOptions{ResolutionStatus: []string{ResolutionOpen}},
+			nextLink:       "/wiki/api/v2/pages/123/inline-comments?cursor=abc123XYZ",
+			wantResolution: "open",
+			wantCursor:     "abc123XYZ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/wiki/api/v2/pages/123/inline-comments", r.URL.Path)
+				assert.Contains(t, r.URL.RawQuery, "body-format=storage")
+				if tt.wantResolution != "" {
+					assert.Contains(t, r.URL.RawQuery, "resolution-status="+tt.wantResolution)
+				} else {
+					assert.NotContains(t, r.URL.RawQuery, "resolution-status")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(PaginatedResponse[InlineComment]{
+					Results: []InlineComment{{ID: "ic1"}},
+					Links:   Links{Next: tt.nextLink},
+				})
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv.URL)
+			comments, next, err := c.GetPageInlineComments(context.Background(), "123", tt.opts)
+			require.NoError(t, err)
+			require.Len(t, comments, 1)
+			assert.Equal(t, "ic1", comments[0].ID)
+			assert.Equal(t, tt.wantCursor, next)
+		})
+	}
+}
+
+func TestGetFooterCommentChildren(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       *ListOptions
+		nextLink   string
+		wantCursor string
+	}{
+		{
+			name:       "defaults body-format",
+			opts:       nil,
+			nextLink:   "/wiki/api/v2/footer-comments/456/children?limit=25&cursor=childCursor1",
+			wantCursor: "childCursor1",
+		},
+		{
+			name:       "resolution status in opts is dropped, children endpoint has no such filter",
+			opts:       &ListOptions{ResolutionStatus: []string{ResolutionOpen}},
+			nextLink:   "/wiki/api/v2/footer-comments/456/children?cursor=childCursor2",
+			wantCursor: "childCursor2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/wiki/api/v2/footer-comments/456/children", r.URL.Path)
+				assert.Contains(t, r.URL.RawQuery, "body-format=storage")
+				assert.NotContains(t, r.URL.RawQuery, "resolution-status")
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(PaginatedResponse[Comment]{
+					Results: []Comment{{ID: "fc1"}},
+					Links:   Links{Next: tt.nextLink},
+				})
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv.URL)
+			children, next, err := c.GetFooterCommentChildren(context.Background(), "456", tt.opts)
+			require.NoError(t, err)
+			require.Len(t, children, 1)
+			assert.Equal(t, "fc1", children[0].ID)
+			assert.Equal(t, tt.wantCursor, next)
+		})
+	}
+}
+
+func TestGetInlineCommentChildren(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       *ListOptions
+		nextLink   string
+		wantCursor string
+	}{
+		{
+			name:       "defaults body-format",
+			opts:       nil,
+			nextLink:   "/wiki/api/v2/inline-comments/456/children?limit=25&cursor=inlineChildCursor1",
+			wantCursor: "inlineChildCursor1",
+		},
+		{
+			name:       "resolution status in opts is dropped, children endpoint has no such filter",
+			opts:       &ListOptions{ResolutionStatus: []string{ResolutionResolved}},
+			nextLink:   "/wiki/api/v2/inline-comments/456/children?cursor=inlineChildCursor2",
+			wantCursor: "inlineChildCursor2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/wiki/api/v2/inline-comments/456/children", r.URL.Path)
+				assert.Contains(t, r.URL.RawQuery, "body-format=storage")
+				assert.NotContains(t, r.URL.RawQuery, "resolution-status")
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(PaginatedResponse[InlineComment]{
+					Results: []InlineComment{{ID: "ic2"}},
+					Links:   Links{Next: tt.nextLink},
+				})
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv.URL)
+			children, next, err := c.GetInlineCommentChildren(context.Background(), "456", tt.opts)
+			require.NoError(t, err)
+			require.Len(t, children, 1)
+			assert.Equal(t, "ic2", children[0].ID)
+			assert.Equal(t, tt.wantCursor, next)
+		})
+	}
+}
+
+func TestExtractCursor(t *testing.T) {
+	tests := []struct {
+		name string
+		next string
+		want string
+	}{
+		{
+			name: "cursor is the last param, no trailing ampersand",
+			next: "/wiki/api/v2/pages/123/inline-comments?limit=25&cursor=lastParamCursor",
+			want: "lastParamCursor",
+		},
+		{
+			name: "cursor is followed by another param",
+			next: "/wiki/api/v2/pages/123/inline-comments?cursor=midParamCursor&limit=25",
+			want: "midParamCursor",
+		},
+		{
+			name: "percent-encoded value is returned unchanged, not decoded",
+			next: "/wiki/api/v2/pages/123/inline-comments?cursor=eyJpZCI6MX0%3D&limit=25",
+			want: "eyJpZCI6MX0%3D",
+		},
+		{
+			name: "no cursor param present",
+			next: "/wiki/api/v2/pages/123/inline-comments?limit=25",
+			want: "",
+		},
+		{
+			name: "empty input",
+			next: "",
+			want: "",
+		},
+		{
+			name: "prefix-boundary decoy: precursor",
+			next: "/wiki/api/v2/pages/123/inline-comments?precursor=x&cursor=real",
+			want: "real",
+		},
+		{
+			name: "prefix-boundary decoy: mycursor",
+			next: "/wiki/api/v2/pages/123/inline-comments?mycursor=x&cursor=real",
+			want: "real",
+		},
+		{
+			name: "cursor present with empty value",
+			next: "/wiki/api/v2/pages/123/inline-comments?cursor=&limit=25",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, extractCursor(tt.next))
+		})
+	}
+}
+
+func TestGetFooterComment(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/wiki/api/v2/footer-comments/456", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
@@ -230,15 +450,82 @@ func TestGetComment(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv.URL)
-	comment, err := c.GetComment(context.Background(), "456")
+	comment, err := c.GetFooterComment(context.Background(), "456")
 	require.NoError(t, err)
 	assert.Equal(t, "456", comment.ID)
 }
 
+func TestGetInlineComment(t *testing.T) {
+	tests := []struct {
+		name           string
+		commentID      string
+		statusCode     int
+		respBody       string
+		wantErr        bool
+		wantStatus     int
+		wantID         string
+		wantResolution string
+		wantSelection  string
+	}{
+		{
+			name:       "decodes resolution status and inline original selection",
+			commentID:  "789",
+			statusCode: http.StatusOK,
+			respBody: `{
+				"id": "789",
+				"resolutionStatus": "resolved",
+				"properties": {"inlineOriginalSelection": "the selected text"}
+			}`,
+			wantID:         "789",
+			wantResolution: "resolved",
+			wantSelection:  "the selected text",
+		},
+		{
+			name:       "404 surfaces as APIError with StatusCode 404",
+			commentID:  "missing",
+			statusCode: http.StatusNotFound,
+			respBody:   `{"message":"not found"}`,
+			wantErr:    true,
+			wantStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/wiki/api/v2/inline-comments/"+tt.commentID, r.URL.Path)
+				assert.Contains(t, r.URL.RawQuery, "body-format=storage")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write([]byte(tt.respBody))
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv.URL)
+			comment, err := c.GetInlineComment(context.Background(), tt.commentID)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				var apiErr *APIError
+				require.ErrorAs(t, err, &apiErr)
+				assert.Equal(t, tt.wantStatus, apiErr.StatusCode)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantID, comment.ID)
+			assert.Equal(t, tt.wantResolution, comment.ResolutionStatus)
+			assert.Equal(t, tt.wantSelection, comment.Properties.InlineOriginalSelection)
+		})
+	}
+}
+
 func TestAddComment(t *testing.T) {
+	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
 		assert.Contains(t, r.URL.Path, "footer-comments")
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(Comment{ID: "c2"})
 	}))
@@ -248,6 +535,114 @@ func TestAddComment(t *testing.T) {
 	comment, err := c.AddComment(context.Background(), "123", "<p>New comment</p>")
 	require.NoError(t, err)
 	assert.Equal(t, "c2", comment.ID)
+
+	assert.Equal(t, "123", gotBody["pageId"])
+	_, hasParentID := gotBody["parentCommentId"]
+	assert.False(t, hasParentID, "parentCommentId must be absent from a top-level comment payload")
+}
+
+// capturedRequest records what a captureCommentPost server received.
+type capturedRequest struct {
+	Method string
+	Path   string
+	Body   map[string]any
+}
+
+// captureCommentPost stands up an httptest server that captures the
+// method, path, and decoded JSON body of the request it receives, then
+// responds with respBody.
+func captureCommentPost(t *testing.T, respBody string) (*Client, *capturedRequest) {
+	t.Helper()
+	captured := &capturedRequest{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.Method = r.Method
+		captured.Path = r.URL.Path
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&captured.Body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(respBody))
+	}))
+	t.Cleanup(srv.Close)
+	return newTestClient(t, srv.URL), captured
+}
+
+// assertReplyPayload asserts the shape common to every reply payload:
+// parentCommentId present and equal to wantParentID, pageId and
+// inlineCommentProperties absent, and the storage body matching wantBody.
+func assertReplyPayload(t *testing.T, got *capturedRequest, wantParentID, wantBody string) {
+	t.Helper()
+	assert.Equal(t, http.MethodPost, got.Method)
+	assert.Equal(t, wantParentID, got.Body["parentCommentId"])
+
+	_, hasPageID := got.Body["pageId"]
+	assert.False(t, hasPageID, "pageId must be absent from a reply payload, not just empty")
+
+	_, hasInlineProps := got.Body["inlineCommentProperties"]
+	assert.False(t, hasInlineProps, "inlineCommentProperties must be absent on a reply")
+
+	body, ok := got.Body["body"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "storage", body["representation"])
+	assert.Equal(t, wantBody, body["value"])
+}
+
+func TestAddCommentReply(t *testing.T) {
+	t.Run("footer comment reply", func(t *testing.T) {
+		c, got := captureCommentPost(t, `{"id":"c-reply-1"}`)
+
+		comment, err := c.AddFooterCommentReply(context.Background(), "parent-1", "<p>A reply</p>")
+		require.NoError(t, err)
+
+		assert.Equal(t, "/wiki/api/v2/footer-comments", got.Path)
+		assertReplyPayload(t, got, "parent-1", "<p>A reply</p>")
+		assert.Equal(t, "c-reply-1", comment.ID)
+	})
+
+	t.Run("inline comment reply", func(t *testing.T) {
+		c, got := captureCommentPost(t, `{
+			"id": "ic-reply-1",
+			"resolutionStatus": "open",
+			"properties": {"inlineOriginalSelection": "selected text"}
+		}`)
+
+		comment, err := c.AddInlineCommentReply(context.Background(), "parent-2", "<p>An inline reply</p>")
+		require.NoError(t, err)
+
+		assert.Equal(t, "/wiki/api/v2/inline-comments", got.Path)
+		assertReplyPayload(t, got, "parent-2", "<p>An inline reply</p>")
+		assert.Equal(t, "ic-reply-1", comment.ID)
+		assert.Equal(t, "open", comment.ResolutionStatus)
+		assert.Equal(t, "selected text", comment.Properties.InlineOriginalSelection)
+	})
+
+	t.Run("footer reply error propagates as APIError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"message":"parentCommentId not found"}`))
+		}))
+		defer srv.Close()
+
+		c := newTestClient(t, srv.URL)
+		_, err := c.AddFooterCommentReply(context.Background(), "missing-parent", "<p>x</p>")
+		require.Error(t, err)
+		var apiErr *APIError
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+	})
+
+	t.Run("inline reply error propagates as APIError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"forbidden"}`))
+		}))
+		defer srv.Close()
+
+		c := newTestClient(t, srv.URL)
+		_, err := c.AddInlineCommentReply(context.Background(), "missing-parent", "<p>x</p>")
+		require.Error(t, err)
+		var apiErr *APIError
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+	})
 }
 
 func TestUpdateComment(t *testing.T) {
@@ -488,4 +883,79 @@ func TestDoJSON_4xxError(t *testing.T) {
 	_, err := c.GetPage(context.Background(), "999")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "404")
+}
+
+func TestBuildQuery(t *testing.T) {
+	tests := []struct {
+		name string
+		opts *ListOptions
+		want string
+	}{
+		{
+			name: "nil opts",
+			opts: nil,
+			want: "",
+		},
+		{
+			name: "empty opts",
+			opts: &ListOptions{},
+			want: "",
+		},
+		{
+			name: "limit only",
+			opts: &ListOptions{Limit: 25},
+			want: "?limit=25",
+		},
+		{
+			// Cursor arrives pre-encoded from _links.next (see extractCursor) and
+			// must pass through verbatim -- re-escaping it here would double
+			// encode it and break pagination. Do not "fix" this back to
+			// url.QueryEscape.
+			name: "pre-encoded cursor passes through verbatim",
+			opts: &ListOptions{Cursor: "eyJpZCI6MX0%3D"},
+			want: "?cursor=eyJpZCI6MX0%3D",
+		},
+		{
+			name: "body format only",
+			opts: &ListOptions{BodyFormat: "storage"},
+			want: "?body-format=storage",
+		},
+		{
+			name: "body format with characters requiring escaping",
+			opts: &ListOptions{BodyFormat: "storage view"},
+			want: "?body-format=storage+view",
+		},
+		{
+			name: "single resolution status",
+			opts: &ListOptions{ResolutionStatus: []string{ResolutionOpen}},
+			want: "?resolution-status=open",
+		},
+		{
+			name: "multiple resolution statuses repeat the param",
+			opts: &ListOptions{ResolutionStatus: []string{ResolutionOpen, ResolutionResolved}},
+			want: "?resolution-status=open&resolution-status=resolved",
+		},
+		{
+			name: "resolution status with characters requiring escaping",
+			opts: &ListOptions{ResolutionStatus: []string{"open&extra=1"}},
+			want: "?resolution-status=open%26extra%3D1",
+		},
+		{
+			name: "combination of limit, cursor, body format and statuses",
+			opts: &ListOptions{
+				Limit:            10,
+				Cursor:           "next-cursor",
+				BodyFormat:       "storage",
+				ResolutionStatus: []string{ResolutionOpen, ResolutionResolved},
+			},
+			want: "?limit=10&cursor=next-cursor&body-format=storage&resolution-status=open&resolution-status=resolved",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildQuery(tt.opts)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }

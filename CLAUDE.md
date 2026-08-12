@@ -53,12 +53,18 @@ scripts/                        install-mcp.sh, confluence-mcp-wrapper.sh, smoke
 - `internal/confluencemcp/client.go` defines a `ConfluenceClient` interface matching the client methods — handlers depend on this interface; tests use a mock.
 - Tool handlers live in separate files per tool (`tool_read.go`, `tool_write.go`) with corresponding `_test.go` files plus `integration_test.go` (in-process MCP client/server via `NewInMemoryTransports`).
 - A receiving middleware in `server.go` logs every `tools/call` request with tool name, duration, and result size.
-- `confluence_write` accepts Markdown in body fields and auto-converts to storage format via `mdconv.ToStorageFormat()`. Setting `format="storage"` on an item pushes raw XHTML through (for macro authoring).
+- `confluence_write` accepts Markdown in body fields and auto-converts to storage format via `mdconv.ToStorageFormat()`. Setting `format="storage"` on a `create`, `update`, `append`, or `reply_comment` item pushes raw XHTML through (for macro authoring); `comment`, `edit_comment`, `delete`, `add_label`, and `remove_label` reject `format`. `create`'s optional `page_id` names the source page whose macro registry to reuse when the body carries `<!-- macro:mN -->` sentinels (e.g. copying a page while preserving its macros) — it is a hard error otherwise.
 - The `append` action performs a server-side splice: the handler fetches the current storage body, splices the fragment via `internal/confluencemcp/splice.go`, and PUTs the merged result — but the agent only sends the fragment (not the full body). Typical edits are ~100× smaller than `update` payloads, cutting both wall-clock and token cost. The success message reports fragment size and base→merged body bytes so the saving is visible to the caller. Always prefer `append` over `update` for additive edits or single-section replacements; use `update` only when rewriting the whole page. Positions are `end`, `after_heading`, `end_of_section`, `replace_section`: `after_heading` inserts at the top of a section, `end_of_section` at the bottom (after its existing content, before the next heading) — a new sibling section wants `end_of_section`, since `after_heading` displaces the target section's own body into it. Retries once on 409 when no `version_number` is pinned (Confluence read replicas are eventually consistent); surfaces `version_conflict` without retry when the caller pins a version.
 - `confluence_read` converts storage-format responses to Markdown via `mdconv.ToMarkdownWithMacrosResolved()` using a per-conversion `pageResolver` (user cache, depth cap 3). Setting `format="storage"` returns raw XHTML instead.
 - Long pages are adaptively chunked: if content exceeds the threshold, the first chunk + a TOC is returned. Follow-ups use either `section` (by heading) or `next_page_token` (base64url JSON cursor with section-index or byte-offset mode). Cache-served with a silent refetch fallback if the cache has evicted.
 - A 60-second in-memory page cache keyed by page ID avoids re-fetching for section follow-ups. Successful `update` and `delete` evict the cache.
 - Uses Confluence REST API v2 for all endpoints except v1 for CQL search, current user, and label add/remove (v2 has no equivalents).
+- `confluence_read` gained an `inline_comments` resource (needs `page_id`); both comment resources render threaded, and every top-level entry is labelled with its ID and `(type: footer|inline)` — that label is the `comment_type` an agent feeds back to `reply_comment`.
+- `confluence_write` gained `reply_comment`. Inline writes are replies only — no new anchored inline comments; that needs text-selection anchoring and is a follow-up.
+- Replies send `parentCommentId` and omit `pageId` entirely — the Confluence spec makes the two mutually exclusive on both create models.
+- Per-action field validation (`validateWriteItemFields` in `tool_write.go`): a field supplied to an action that does not use it is a hard error in both directions. One `WriteItem` struct backs every action and the tool schema is reflected from it, so validation is the only guard against a silent field-drop — which is what caused a real mis-post: `action: "comment"` with `comment_type: "inline"` silently posted a footer comment. `format` is rejected on `comment`, `edit_comment`, `delete`, `add_label`, and `remove_label`, which ignore it today.
+- Child replies are fetched per thread, capped at 25 threads per read, with a truncation notice beyond that; a per-thread child-fetch failure degrades to a notice rather than failing the whole read.
+- An inline-comment permalink (`focusedCommentId`) falls back to the inline endpoint when the footer fetch 404s.
 
 ### Markdown converter
 
@@ -90,6 +96,25 @@ task build          # Must compile cleanly
 ```
 
 Do not skip any of these. If lint or tests fail, fix before moving on. Smoke tests are opt-in and not part of the gate, but run them locally when changes touch the HTTP client, handlers, or converter.
+
+**Formatting is `golangci-lint fmt`, not stock `gofmt`.** `task lint` reporting `0 issues` is the
+authoritative gate; do not use `gofmt -l`, which disagrees with the project's formatter.
+
+**Watch out: `task fmt` reformats nine files unrelated to whatever you are changing.** These files are
+committed in a state the project's own formatter disagrees with (comment and struct-field alignment
+only), and `task lint` does not flag them because `golangci-lint run` does not enforce the formatter:
+
+```
+internal/confluencemcp/append_preview.go     internal/mdconv/fixture_test.go
+internal/confluencemcp/integration_test.go   internal/mdconv/macro_test.go
+internal/confluencemcp/tool_read_test.go     internal/mdconv/preprocess.go
+internal/confluencemcp/tool_write_append.go  internal/mdconv/testgen/fingerprint.go
+internal/confluencemcp/tool_write_test.go
+```
+
+After running `task fmt`, check `git status` and revert any of the above you did not mean to touch, or
+they add around 50 lines of whitespace noise to your diff. Fixing the drift is worth doing — as its
+own formatting-only PR, never bundled into a feature change.
 
 ## CI
 
