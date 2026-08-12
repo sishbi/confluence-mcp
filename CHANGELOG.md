@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.10](https://github.com/sishbi/confluence-mcp/compare/v0.0.9...v0.0.10) (2026-08-12)
+
+
+### Features
+
+* add inline comments, threading and reply_comment ([#27](https://github.com/sishbi/confluence-mcp/issues/27)) ([7e42f4f](https://github.com/sishbi/confluence-mcp/commit/7e42f4f00e9ffd8e144cd11402827210a571ee30))
+
 ## [0.0.9](https://github.com/sishbi/confluence-mcp/compare/v0.0.8...v0.0.9) (2026-08-11)
 
 
