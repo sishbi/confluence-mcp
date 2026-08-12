@@ -2,6 +2,8 @@ package confluencemcp
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -420,6 +422,55 @@ func TestWriteCreate_StorageFormat(t *testing.T) {
 	assert.Equal(t, `<p>Raw XHTML body.</p>`, value)
 }
 
+// TestWriteCreate_RestoresMacrosFromSourcePage pins the Blocker fix: create's
+// page_id names the source page whose macro registry to reuse when the body
+// carries <!-- macro:mN --> sentinels (e.g. copying a page while preserving
+// its macros verbatim). Without page_id reaching ensureMacroRegistry, the
+// macro sentinel falls through to plain mdconv.ToStorageFormat and the macro
+// XML is silently dropped while the tool still reports success.
+func TestWriteCreate_RestoresMacrosFromSourcePage(t *testing.T) {
+	var capturedPayload map[string]any
+
+	h := &handlers{
+		client: &mockClient{
+			GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
+				return &confluence.Page{
+					ID:    id,
+					Title: "Source",
+					Body: confluence.PageBody{Storage: confluence.StorageBody{
+						Value: `<p>Text.</p><ac:structured-macro ac:name="info"><ac:rich-text-body><p>Original note.</p></ac:rich-text-body></ac:structured-macro>`,
+					}},
+					Version: confluence.PageVersion{Number: 5},
+				}, nil
+			},
+			CreatePageFn: func(_ context.Context, payload map[string]any) (*confluence.Page, error) {
+				capturedPayload = payload
+				return &confluence.Page{ID: "new1", Title: "Copy of Source"}, nil
+			},
+		},
+	}
+
+	// Read the source page first to populate the cache with its macro registry.
+	page, _ := h.client.GetPage(context.Background(), "A")
+	_ = h.processPage(context.Background(), page)
+
+	_, err := h.writeCreate(context.Background(), WriteItem{
+		SpaceID: "DEV",
+		Title:   "Copy of Source",
+		Body:    "Text.\n\n<!-- macro:m1 -->\n> **Info:** Original note.\n",
+		PageID:  "A",
+	}, false)
+	require.NoError(t, err)
+
+	body := capturedPayload["body"].(map[string]any)
+	storage := body["storage"].(map[string]any)
+	value := storage["value"].(string)
+
+	assert.Contains(t, value, `ac:name="info"`, "macro XML must be restored verbatim, not dropped")
+	assert.Contains(t, value, "Original note.")
+	assert.Contains(t, value, "Text.")
+}
+
 func TestHandleWrite_DispatchesAppend(t *testing.T) {
 	var capturedPayload map[string]any
 	h := &handlers{
@@ -697,6 +748,413 @@ func TestWriteTool_DescriptionMentionsAppend(t *testing.T) {
 	assert.Contains(t, desc, "end")
 	assert.Contains(t, desc, "after_heading")
 	assert.Contains(t, desc, "replace_section")
+}
+
+// TestWriteTool_DescriptionFormatActionNames guards against the write tool
+// description's format="storage" sentence (server.go) drifting from
+// permittedWriteFields — the exact duplication that already went stale once
+// on this branch (the page_id-on-create removal masked it). The description
+// must name exactly the actions whose permitted field set contains "format".
+func TestWriteTool_DescriptionFormatActionNames(t *testing.T) {
+	var formatActions []string
+	for _, action := range writeActionNames {
+		if permittedWriteFields[action]["format"] {
+			formatActions = append(formatActions, action)
+		}
+	}
+	require.NotEmpty(t, formatActions)
+
+	expected := formatActions[len(formatActions)-1]
+	if len(formatActions) > 1 {
+		expected = strings.Join(formatActions[:len(formatActions)-1], ", ") + ", or " + expected
+	}
+
+	assert.Contains(t, writeTool.Description, expected,
+		`the format="storage" sentence must name exactly the actions whose permittedWriteFields set contains "format"`)
+	assert.Contains(t, serverInstructions, expected,
+		`serverInstructions carries its own copy of the format="storage" sentence — it must also name exactly the actions whose permittedWriteFields set contains "format"`)
+}
+
+func TestHandleWrite_ReplyComment(t *testing.T) {
+	t.Run("footer reply routes to AddFooterCommentReplyFn", func(t *testing.T) {
+		var footerCalls, inlineCalls int
+		var capturedParentID string
+		h := &handlers{
+			client: &mockClient{
+				AddFooterCommentReplyFn: func(_ context.Context, parentCommentID string, _ string) (*confluence.Comment, error) {
+					footerCalls++
+					capturedParentID = parentCommentID
+					return &confluence.Comment{ID: "r1"}, nil
+				},
+				AddInlineCommentReplyFn: func(_ context.Context, _ string, _ string) (*confluence.InlineComment, error) {
+					inlineCalls++
+					return &confluence.InlineComment{ID: "should-not-be-called"}, nil
+				},
+			},
+		}
+
+		args := WriteArgs{
+			Action: "reply_comment",
+			Items:  []WriteItem{{ParentCommentID: "999", CommentType: "footer", Body: "Thanks!"}},
+		}
+		result, _, err := h.handleWrite(context.Background(), nil, args)
+		require.NoError(t, err)
+		assert.False(t, result.IsError)
+
+		assert.Equal(t, 1, footerCalls)
+		assert.Equal(t, 0, inlineCalls, "inline reply must not fire for a footer reply")
+		assert.Equal(t, "999", capturedParentID)
+
+		text := firstText(t, result)
+		assert.Contains(t, text, "r1")
+		assert.Contains(t, text, "999")
+		assert.Contains(t, text, "footer")
+	})
+
+	t.Run("inline reply routes to AddInlineCommentReplyFn", func(t *testing.T) {
+		var footerCalls, inlineCalls int
+		var capturedParentID string
+		h := &handlers{
+			client: &mockClient{
+				AddFooterCommentReplyFn: func(_ context.Context, _ string, _ string) (*confluence.Comment, error) {
+					footerCalls++
+					return &confluence.Comment{ID: "should-not-be-called"}, nil
+				},
+				AddInlineCommentReplyFn: func(_ context.Context, parentCommentID string, _ string) (*confluence.InlineComment, error) {
+					inlineCalls++
+					capturedParentID = parentCommentID
+					return &confluence.InlineComment{ID: "r2"}, nil
+				},
+			},
+		}
+
+		args := WriteArgs{
+			Action: "reply_comment",
+			Items:  []WriteItem{{ParentCommentID: "888", CommentType: "inline", Body: "Looks good."}},
+		}
+		result, _, err := h.handleWrite(context.Background(), nil, args)
+		require.NoError(t, err)
+		assert.False(t, result.IsError)
+
+		assert.Equal(t, 1, inlineCalls)
+		assert.Equal(t, 0, footerCalls, "footer reply must not fire for an inline reply")
+		assert.Equal(t, "888", capturedParentID)
+
+		text := firstText(t, result)
+		assert.Contains(t, text, "r2")
+		assert.Contains(t, text, "888")
+		assert.Contains(t, text, "inline")
+	})
+
+	t.Run("missing parent_comment_id errors", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeReplyComment(context.Background(), WriteItem{CommentType: "footer", Body: "x"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parent_comment_id")
+	})
+
+	t.Run("missing comment_type errors naming valid values", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeReplyComment(context.Background(), WriteItem{ParentCommentID: "1", Body: "x"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "comment_type is required")
+		assert.Contains(t, err.Error(), "footer")
+		assert.Contains(t, err.Error(), "inline")
+	})
+
+	t.Run("invalid comment_type reports the bad value, not a missing field", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeReplyComment(context.Background(), WriteItem{ParentCommentID: "1", CommentType: "footnote", Body: "x"}, false)
+		require.Error(t, err)
+		// "is required" would misdescribe a value that was supplied but wrong.
+		assert.NotContains(t, err.Error(), "is required")
+		assert.Contains(t, err.Error(), `invalid comment_type "footnote"`)
+		assert.Contains(t, err.Error(), "footer")
+		assert.Contains(t, err.Error(), "inline")
+	})
+
+	t.Run("missing body errors", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.writeReplyComment(context.Background(), WriteItem{ParentCommentID: "1", CommentType: "footer"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "body")
+	})
+
+	t.Run("markdown body converts to storage format", func(t *testing.T) {
+		var capturedBody string
+		h := &handlers{
+			client: &mockClient{
+				AddFooterCommentReplyFn: func(_ context.Context, _ string, storageBody string) (*confluence.Comment, error) {
+					capturedBody = storageBody
+					return &confluence.Comment{ID: "r3"}, nil
+				},
+			},
+		}
+		_, err := h.writeReplyComment(context.Background(), WriteItem{
+			ParentCommentID: "1", CommentType: "footer", Body: "**bold** reply",
+		}, false)
+		require.NoError(t, err)
+		assert.Contains(t, capturedBody, "<strong>bold</strong>")
+	})
+
+	t.Run("format storage passes body through unmodified", func(t *testing.T) {
+		const raw = `<p>Raw <ac:structured-macro ac:name="info"></ac:structured-macro> XHTML.</p>`
+		var capturedBody string
+		h := &handlers{
+			client: &mockClient{
+				AddInlineCommentReplyFn: func(_ context.Context, _ string, storageBody string) (*confluence.InlineComment, error) {
+					capturedBody = storageBody
+					return &confluence.InlineComment{ID: "r4"}, nil
+				},
+			},
+		}
+		_, err := h.writeReplyComment(context.Background(), WriteItem{
+			ParentCommentID: "1", CommentType: "inline", Body: raw, Format: "storage",
+		}, false)
+		require.NoError(t, err)
+		assert.Equal(t, raw, capturedBody)
+	})
+
+	t.Run("dry_run fires no client call", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}} // no Fn set — call would panic
+		msg, err := h.writeReplyComment(context.Background(), WriteItem{
+			ParentCommentID: "1", CommentType: "footer", Body: "hi",
+		}, true)
+		require.NoError(t, err)
+		assert.Contains(t, msg, "Would add")
+		assert.Contains(t, msg, "footer")
+		assert.Contains(t, msg, "comment 1")
+	})
+}
+
+func TestHandleWrite_FieldValidation(t *testing.T) {
+	t.Run("parent_id on comment errors naming parent_comment_id", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.dispatchWriteItem(context.Background(), "comment", WriteItem{PageID: "1", Body: "hi", ParentID: "9"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parent_comment_id")
+	})
+
+	t.Run("parent_id on reply_comment errors naming parent_comment_id", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.dispatchWriteItem(context.Background(), "reply_comment", WriteItem{
+			ParentCommentID: "1", CommentType: "footer", Body: "hi", ParentID: "9",
+		}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parent_comment_id")
+	})
+
+	t.Run("comment_type on comment errors", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.dispatchWriteItem(context.Background(), "comment", WriteItem{PageID: "1", Body: "hi", CommentType: "footer"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "comment_type")
+	})
+
+	t.Run("comment_type on create errors", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.dispatchWriteItem(context.Background(), "create", WriteItem{SpaceID: "s", Title: "t", CommentType: "footer"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "comment_type")
+	})
+
+	t.Run("comment_type on update errors", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.dispatchWriteItem(context.Background(), "update", WriteItem{PageID: "1", VersionNumber: 1, CommentType: "footer"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "comment_type")
+	})
+
+	t.Run("parent_comment_id on comment errors", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.dispatchWriteItem(context.Background(), "comment", WriteItem{PageID: "1", Body: "hi", ParentCommentID: "9"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parent_comment_id")
+	})
+
+	t.Run("parent_comment_id on create errors", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.dispatchWriteItem(context.Background(), "create", WriteItem{SpaceID: "s", Title: "t", ParentCommentID: "9"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parent_comment_id")
+	})
+
+	t.Run("parent_comment_id on update errors", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.dispatchWriteItem(context.Background(), "update", WriteItem{PageID: "1", VersionNumber: 1, ParentCommentID: "9"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parent_comment_id")
+	})
+
+	t.Run("parent_id on create still succeeds", func(t *testing.T) {
+		h := &handlers{
+			client: &mockClient{
+				CreatePageFn: func(_ context.Context, _ map[string]any) (*confluence.Page, error) {
+					return &confluence.Page{ID: "1", Title: "t"}, nil
+				},
+			},
+		}
+		_, err := h.dispatchWriteItem(context.Background(), "create", WriteItem{SpaceID: "s", Title: "t", ParentID: "9"}, false)
+		require.NoError(t, err)
+	})
+
+	t.Run("page_id on create with a macro sentinel body is accepted", func(t *testing.T) {
+		h := &handlers{
+			client: &mockClient{
+				GetPageFn: func(_ context.Context, id string) (*confluence.Page, error) {
+					return &confluence.Page{ID: id, Body: confluence.PageBody{Storage: confluence.StorageBody{Value: "<p>Original.</p>"}}}, nil
+				},
+				CreatePageFn: func(_ context.Context, _ map[string]any) (*confluence.Page, error) {
+					return &confluence.Page{ID: "new1", Title: "t"}, nil
+				},
+			},
+		}
+		_, err := h.dispatchWriteItem(context.Background(), "create", WriteItem{
+			SpaceID: "s", Title: "t", PageID: "12345", Body: "Text.\n\n<!-- macro:m1 -->\n",
+		}, false)
+		require.NoError(t, err, "page_id names the source page whose macro registry to reuse — create's handler genuinely reads it when the body carries a macro sentinel")
+	})
+
+	t.Run("page_id on create without a macro sentinel body errors", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}} // no Fn set — a client call would panic
+		_, err := h.dispatchWriteItem(context.Background(), "create", WriteItem{
+			SpaceID: "s", Title: "t", PageID: "12345", Body: "Plain body, no macros.",
+		}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "page_id")
+	})
+
+	t.Run("page_id on create with no body errors", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}} // no Fn set — a client call would panic
+		_, err := h.dispatchWriteItem(context.Background(), "create", WriteItem{
+			SpaceID: "s", Title: "t", PageID: "12345",
+		}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "page_id")
+	})
+
+	t.Run("format on comment errors explaining why, not just that it is invalid", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.dispatchWriteItem(context.Background(), "comment", WriteItem{PageID: "1", Body: "hi", Format: "storage"}, false)
+		require.Error(t, err)
+		assert.Equal(t, `format is not supported for action "comment" — comment bodies are always converted from Markdown; raw XHTML in comments is not yet supported`, err.Error())
+	})
+
+	t.Run("format on edit_comment errors explaining why, not just that it is invalid", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		_, err := h.dispatchWriteItem(context.Background(), "edit_comment", WriteItem{CommentID: "1", Body: "hi", VersionNumber: 1, Format: "storage"}, false)
+		require.Error(t, err)
+		assert.Equal(t, `format is not supported for action "edit_comment" — comment bodies are always converted from Markdown; raw XHTML in comments is not yet supported`, err.Error())
+	})
+}
+
+// TestWriteFields_MatchesWriteItemStruct guards D6's self-defending property:
+// writeFields is a hand-maintained mirror of every WriteItem field, and a new
+// field left off it is accepted by every action and silently dropped — the
+// original mis-post's defect class, reproduced. A count-only check would pass
+// if a future change adds one field and removes another, so this also checks
+// that every writeFields name matches a real WriteItem json tag.
+func TestWriteFields_MatchesWriteItemStruct(t *testing.T) {
+	typ := reflect.TypeOf(WriteItem{})
+
+	t.Run("count matches WriteItem field count", func(t *testing.T) {
+		assert.Equal(t, typ.NumField(), len(writeFields),
+			"writeFields has %d entries but WriteItem has %d fields — add the new field to writeFields and to the permittedWriteFields set of every action whose handler consumes it",
+			len(writeFields), typ.NumField())
+	})
+
+	t.Run("every name matches an actual WriteItem json tag", func(t *testing.T) {
+		tagNames := make(map[string]bool, typ.NumField())
+		for i := 0; i < typ.NumField(); i++ {
+			tag := typ.Field(i).Tag.Get("json")
+			name := strings.Split(tag, ",")[0]
+			tagNames[name] = true
+		}
+		for _, f := range writeFields {
+			assert.True(t, tagNames[f.name],
+				"writeFields entry %q has no matching WriteItem json tag — add the new field to writeFields and to the permittedWriteFields set of every action whose handler consumes it",
+				f.name)
+		}
+	})
+}
+
+// TestValidActionsMatchesPermittedWriteFields guards against the two tables
+// drifting: a key present in validActions but missing from
+// permittedWriteFields yields a nil permitted map, which rejects every field
+// for that action with a message that reads like a schema bug rather than a
+// missing table row.
+func TestValidActionsMatchesPermittedWriteFields(t *testing.T) {
+	for action := range validActions {
+		_, ok := permittedWriteFields[action]
+		assert.True(t, ok, "action %q is in validActions but missing from permittedWriteFields", action)
+	}
+	for action := range permittedWriteFields {
+		_, ok := validActions[action]
+		assert.True(t, ok, "action %q is in permittedWriteFields but missing from validActions", action)
+	}
+}
+
+// TestHandleWrite_BatchValidationFailure exercises validation through
+// handleWrite's multi-item accumulation, not just dispatchWriteItem directly.
+// Every other field-validation test bypasses handleWrite's per-item loop, so
+// nothing else would catch a refactor that hoisted validation to a pre-flight
+// pass or swallowed a per-item error.
+func TestHandleWrite_BatchValidationFailure(t *testing.T) {
+	var footerCalls int
+	h := &handlers{
+		client: &mockClient{
+			AddFooterCommentReplyFn: func(_ context.Context, _ string, _ string) (*confluence.Comment, error) {
+				footerCalls++
+				return &confluence.Comment{ID: "r1"}, nil
+			},
+		},
+	}
+
+	args := WriteArgs{
+		Action: "reply_comment",
+		Items: []WriteItem{
+			{ParentCommentID: "1", CommentType: "footer", Body: "ok"},
+			{ParentCommentID: "2", CommentType: "footer", Body: "bad", ParentID: "9"},
+		},
+	}
+	result, _, err := h.handleWrite(context.Background(), nil, args)
+	require.NoError(t, err)
+
+	text := firstText(t, result)
+	assert.Contains(t, text, "[1] Added footer reply r1 to comment 1")
+	assert.Contains(t, text, "[2] error:")
+	assert.Contains(t, text, "parent_comment_id")
+	assert.Equal(t, 1, footerCalls, "item 2's validation error must not reach the client")
+}
+
+func TestHandleWrite_ReplyCommentActionReachable(t *testing.T) {
+	h := &handlers{client: &mockClient{}}
+
+	// dry_run: true so a reachable dispatch never touches the (unset) client
+	// mock. If reply_comment were still missing from validActions, this
+	// would come back as the unknown-action error instead of the dry-run
+	// preview — that is the failure Part 1 of the contract exists to prevent.
+	args := WriteArgs{
+		Action: "reply_comment",
+		Items:  []WriteItem{{ParentCommentID: "1", CommentType: "footer", Body: "hi"}},
+		DryRun: true,
+	}
+	result, _, err := h.handleWrite(context.Background(), nil, args)
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	text := firstText(t, result)
+	assert.Contains(t, text, "Would add")
+	assert.NotContains(t, text, "unknown action")
+
+	// The unknown-action error string also names reply_comment, so removing
+	// it from that string alone (without touching validActions) still fails
+	// this test.
+	badArgs := WriteArgs{Action: "fly_to_moon", Items: []WriteItem{{PageID: "1"}}}
+	badResult, _, err := h.handleWrite(context.Background(), nil, badArgs)
+	require.NoError(t, err)
+	assert.True(t, badResult.IsError)
+	badText := firstText(t, badResult)
+	assert.Contains(t, badText, "reply_comment")
 }
 
 func TestHandleWrite_CacheEviction(t *testing.T) {

@@ -6,8 +6,8 @@ Give your AI agent full Confluence access with just 2 tools.
 
 | Tool | What it does |
 |---|---|
-| `confluence_read` | Get pages by ID/URL, search via CQL, list spaces/children/comments/labels |
-| `confluence_write` | Create, update, delete pages; add/edit comments; manage labels. Batch + dry_run |
+| `confluence_read` | Get pages by ID/URL, search via CQL, list spaces/children/comments/inline comments/labels |
+| `confluence_write` | Create, update, delete pages; add/edit/reply to comments; manage labels. Batch + dry_run |
 
 ## Philosophy
 
@@ -20,7 +20,7 @@ Give your AI agent full Confluence access with just 2 tools.
 ### Reading
 - **URL parsing** — paste any Confluence page URL, including `?focusedCommentId=` deep-links
 - **CQL search** — arbitrary CQL queries via the v1 search endpoint
-- **Resource listings** — spaces, children, comments, labels
+- **Resource listings** — spaces, children, comments, inline comments, labels
 - **Adaptive chunking** — long pages return a TOC + first chunk; request sections individually by heading
 - **`next_page_token` cursor** — base64url JSON cursor for section-index or byte-offset paging; re-fetches silently if the cache has evicted
 - **60-second page cache** — eliminates redundant API calls for section follow-ups; evicted on write
@@ -28,7 +28,7 @@ Give your AI agent full Confluence access with just 2 tools.
 
 ### Writing
 - **Markdown in, storage format out** — body fields auto-convert to Confluence XHTML
-- **Raw storage passthrough** — set `format="storage"` on an item to push XHTML directly (for macro authoring)
+- **Raw storage passthrough** — set `format="storage"` on a create, update, append, or reply_comment item to push XHTML directly (for macro authoring); comment, edit_comment, delete, add_label, and remove_label reject it
 - **Partial-page `append` action** — insert at the end of the page, at the top of a named heading's section (`after_heading`), at the bottom of it (`end_of_section`), or replace the section (`replace_section`). A new sibling section wants `end_of_section`: `after_heading` would displace the target section's own body into it. The agent sends only the fragment; the server fetches the current body, splices, and writes the merged result. Typical edits ship a payload ~100× smaller than `update` (observed ~147 B vs ~34 KB on a representative fixture), cutting both wall-clock and token cost. Success responses report fragment size and base→merged body bytes so the saving is visible in telemetry. Retries once on 409 from read-replica lag when no version is pinned.
 - **Batch-first** — every action takes an array; per-item errors are reported with `[N]` prefixes
 - **Dry run** — preview any write as JSON without calling the API

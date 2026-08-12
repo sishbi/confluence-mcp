@@ -7,23 +7,29 @@ import (
 )
 
 type mockClient struct {
-	BaseURLValue      string
-	GetCurrentUserFn  func(ctx context.Context) (*confluence.User, error)
-	GetUserFn         func(ctx context.Context, accountID string) (*confluence.User, error)
-	GetSpacesFn       func(ctx context.Context, opts *confluence.ListOptions) ([]confluence.Space, string, error)
-	GetPageFn         func(ctx context.Context, id string) (*confluence.Page, error)
-	GetPageChildrenFn func(ctx context.Context, id string, opts *confluence.ListOptions) ([]confluence.Page, string, error)
-	CreatePageFn      func(ctx context.Context, payload map[string]any) (*confluence.Page, error)
-	UpdatePageFn      func(ctx context.Context, id string, payload map[string]any) (*confluence.Page, error)
-	DeletePageFn      func(ctx context.Context, id string) error
-	SearchContentFn   func(ctx context.Context, cql string, opts *confluence.ListOptions) (*confluence.SearchResult, error)
-	GetPageCommentsFn func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error)
-	GetCommentFn      func(ctx context.Context, commentID string) (*confluence.Comment, error)
-	AddCommentFn      func(ctx context.Context, pageID string, body string) (*confluence.Comment, error)
-	UpdateCommentFn   func(ctx context.Context, commentID string, body string, versionNumber int) (*confluence.Comment, error)
-	GetPageLabelsFn   func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Label, string, error)
-	AddPageLabelFn    func(ctx context.Context, pageID string, label string) (*confluence.Label, error)
-	RemovePageLabelFn func(ctx context.Context, pageID string, label string) error
+	BaseURLValue               string
+	GetCurrentUserFn           func(ctx context.Context) (*confluence.User, error)
+	GetUserFn                  func(ctx context.Context, accountID string) (*confluence.User, error)
+	GetSpacesFn                func(ctx context.Context, opts *confluence.ListOptions) ([]confluence.Space, string, error)
+	GetPageFn                  func(ctx context.Context, id string) (*confluence.Page, error)
+	GetPageChildrenFn          func(ctx context.Context, id string, opts *confluence.ListOptions) ([]confluence.Page, string, error)
+	CreatePageFn               func(ctx context.Context, payload map[string]any) (*confluence.Page, error)
+	UpdatePageFn               func(ctx context.Context, id string, payload map[string]any) (*confluence.Page, error)
+	DeletePageFn               func(ctx context.Context, id string) error
+	SearchContentFn            func(ctx context.Context, cql string, opts *confluence.ListOptions) (*confluence.SearchResult, error)
+	GetPageFooterCommentsFn    func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error)
+	GetPageInlineCommentsFn    func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error)
+	GetFooterCommentChildrenFn func(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error)
+	GetInlineCommentChildrenFn func(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error)
+	GetFooterCommentFn         func(ctx context.Context, commentID string) (*confluence.Comment, error)
+	GetInlineCommentFn         func(ctx context.Context, commentID string) (*confluence.InlineComment, error)
+	AddCommentFn               func(ctx context.Context, pageID string, body string) (*confluence.Comment, error)
+	AddFooterCommentReplyFn    func(ctx context.Context, parentCommentID string, storageBody string) (*confluence.Comment, error)
+	AddInlineCommentReplyFn    func(ctx context.Context, parentCommentID string, storageBody string) (*confluence.InlineComment, error)
+	UpdateCommentFn            func(ctx context.Context, commentID string, body string, versionNumber int) (*confluence.Comment, error)
+	GetPageLabelsFn            func(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Label, string, error)
+	AddPageLabelFn             func(ctx context.Context, pageID string, label string) (*confluence.Label, error)
+	RemovePageLabelFn          func(ctx context.Context, pageID string, label string) error
 }
 
 func (m *mockClient) BaseURL() string { return m.BaseURLValue }
@@ -91,18 +97,46 @@ func (m *mockClient) SearchContent(ctx context.Context, cql string, opts *conflu
 	return m.SearchContentFn(ctx, cql, opts)
 }
 
-func (m *mockClient) GetPageComments(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
-	if m.GetPageCommentsFn == nil {
-		panic("GetPageCommentsFn not set")
+func (m *mockClient) GetPageFooterComments(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+	if m.GetPageFooterCommentsFn == nil {
+		panic("GetPageFooterCommentsFn not set")
 	}
-	return m.GetPageCommentsFn(ctx, pageID, opts)
+	return m.GetPageFooterCommentsFn(ctx, pageID, opts)
 }
 
-func (m *mockClient) GetComment(ctx context.Context, commentID string) (*confluence.Comment, error) {
-	if m.GetCommentFn == nil {
-		panic("GetCommentFn not set")
+func (m *mockClient) GetPageInlineComments(ctx context.Context, pageID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+	if m.GetPageInlineCommentsFn == nil {
+		panic("GetPageInlineCommentsFn not set")
 	}
-	return m.GetCommentFn(ctx, commentID)
+	return m.GetPageInlineCommentsFn(ctx, pageID, opts)
+}
+
+func (m *mockClient) GetFooterCommentChildren(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.Comment, string, error) {
+	if m.GetFooterCommentChildrenFn == nil {
+		panic("GetFooterCommentChildrenFn not set")
+	}
+	return m.GetFooterCommentChildrenFn(ctx, commentID, opts)
+}
+
+func (m *mockClient) GetInlineCommentChildren(ctx context.Context, commentID string, opts *confluence.ListOptions) ([]confluence.InlineComment, string, error) {
+	if m.GetInlineCommentChildrenFn == nil {
+		panic("GetInlineCommentChildrenFn not set")
+	}
+	return m.GetInlineCommentChildrenFn(ctx, commentID, opts)
+}
+
+func (m *mockClient) GetFooterComment(ctx context.Context, commentID string) (*confluence.Comment, error) {
+	if m.GetFooterCommentFn == nil {
+		panic("GetFooterCommentFn not set")
+	}
+	return m.GetFooterCommentFn(ctx, commentID)
+}
+
+func (m *mockClient) GetInlineComment(ctx context.Context, commentID string) (*confluence.InlineComment, error) {
+	if m.GetInlineCommentFn == nil {
+		panic("GetInlineCommentFn not set")
+	}
+	return m.GetInlineCommentFn(ctx, commentID)
 }
 
 func (m *mockClient) AddComment(ctx context.Context, pageID string, body string) (*confluence.Comment, error) {
@@ -110,6 +144,20 @@ func (m *mockClient) AddComment(ctx context.Context, pageID string, body string)
 		panic("AddCommentFn not set")
 	}
 	return m.AddCommentFn(ctx, pageID, body)
+}
+
+func (m *mockClient) AddFooterCommentReply(ctx context.Context, parentCommentID string, storageBody string) (*confluence.Comment, error) {
+	if m.AddFooterCommentReplyFn == nil {
+		panic("AddFooterCommentReplyFn not set")
+	}
+	return m.AddFooterCommentReplyFn(ctx, parentCommentID, storageBody)
+}
+
+func (m *mockClient) AddInlineCommentReply(ctx context.Context, parentCommentID string, storageBody string) (*confluence.InlineComment, error) {
+	if m.AddInlineCommentReplyFn == nil {
+		panic("AddInlineCommentReplyFn not set")
+	}
+	return m.AddInlineCommentReplyFn(ctx, parentCommentID, storageBody)
 }
 
 func (m *mockClient) UpdateComment(ctx context.Context, commentID string, body string, versionNumber int) (*confluence.Comment, error) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -713,4 +714,204 @@ func TestIntegration_ReadStorageFormat_WithMacros(t *testing.T) {
 	assert.Contains(t, text, `ac:name="info"`)
 	// Should NOT contain macro comments (those are only in Markdown mode)
 	assert.NotContains(t, text, "<!-- macro:")
+}
+
+// commentIDLineRe matches the "**Comment ID:** <id>  (type: <kind>)" label
+// that renderThread / commentIDLine (tool_read.go) emits ahead of every
+// top-level comment — the same text an agent would scrape to learn a
+// comment's ID and comment_type before calling reply_comment.
+var commentIDLineRe = regexp.MustCompile(`\*\*Comment ID:\*\* (\S+)\s+\(type: (\w+)\)`)
+
+// stubReplyServer is a minimal httptest.Server backing only the endpoints
+// TestIntegration_ReplyComment needs: listing inline comments on a page,
+// fetching a thread's (empty) children, and posting a reply. It is
+// deliberately separate from stubConfluence/newIntegrationServer: this test
+// needs to assert which POST endpoint a reply landed on — the original
+// defect was a reply silently posting as a brand-new top-level footer
+// comment instead of threading under its parent — and package
+// confluencemcp_test cannot reach the unexported mockClient (defined in
+// package confluencemcp's mock_client_test.go) to get that signal via a
+// call-count field. Counting hits on the real HTTP endpoints gives the same
+// regression guard through the real confluence.Client.
+type stubReplyServer struct {
+	srv              *httptest.Server
+	inlineReplyPosts int
+	footerPosts      int
+}
+
+// newStubReplyServer wires up a page with a single inline comment thread
+// (ID parentID) and accepts a reply to it, rejecting any reply whose
+// parentCommentId does not match parentID — this is what lets the
+// deliberate-break check (feeding a wrong parent ID) fail for an
+// observable reason rather than silently succeeding against a stub that
+// accepts anything.
+func newStubReplyServer(t *testing.T, parentID string) *stubReplyServer {
+	t.Helper()
+	rs := &stubReplyServer{}
+	rs.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+
+		switch {
+		// List inline comments on the page.
+		case strings.HasSuffix(path, "/inline-comments") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(confluence.PaginatedResponse[confluence.InlineComment]{
+				Results: []confluence.InlineComment{{
+					ID:               parentID,
+					PageID:           "101",
+					ResolutionStatus: "open",
+					Properties: confluence.InlineCommentProperties{
+						InlineOriginalSelection: "system architecture",
+					},
+					Body: confluence.PageBody{Storage: confluence.StorageBody{
+						Value: "<p>Please add a diagram here.</p>",
+					}},
+				}},
+			})
+
+		// Reply children for the thread — none, for this test.
+		case strings.Contains(path, "/inline-comments/") && strings.HasSuffix(path, "/children") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(confluence.PaginatedResponse[confluence.InlineComment]{})
+
+		// Reply create (v2: POST /wiki/api/v2/inline-comments).
+		case path == "/wiki/api/v2/inline-comments" && r.Method == http.MethodPost:
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["parentCommentId"] != parentID {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"message":"unexpected parentCommentId"}`))
+				return
+			}
+			rs.inlineReplyPosts++
+			_ = json.NewEncoder(w).Encode(confluence.InlineComment{ID: "reply-1", Version: confluence.CommentVersion{Number: 1}})
+
+		// Top-level footer comment create — must NOT be hit by a reply.
+		case path == "/wiki/api/v2/footer-comments" && r.Method == http.MethodPost:
+			rs.footerPosts++
+			_ = json.NewEncoder(w).Encode(confluence.Comment{ID: "footer-reply-1", Version: confluence.CommentVersion{Number: 1}})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"unknown endpoint: ` + path + `"}`))
+		}
+	}))
+	return rs
+}
+
+// newReplyMCPSession wires a real confluence.Client (backed by stub) into a
+// confluence-mcp server and connects an in-process MCP client to it, the
+// same shape as newIntegrationServer but taking a caller-supplied stub so
+// TestIntegration_ReplyComment's fixture stays local to the test rather than
+// growing stubConfluence.
+func newReplyMCPSession(t *testing.T, stub *httptest.Server) (*mcp.ClientSession, func()) {
+	t.Helper()
+	ctx := context.Background()
+
+	client, err := confluence.New(confluence.Config{
+		URL:        stub.URL,
+		Email:      "test@example.com",
+		APIToken:   "test-token",
+		MaxRetries: 0,
+		BaseDelay:  time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	server := confluencemcp.NewServer(client, nil, nil)
+
+	t1, t2 := mcp.NewInMemoryTransports()
+	_, err = server.Connect(ctx, t1, nil)
+	require.NoError(t, err)
+
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "integration-test", Version: "v0.0.1"}, nil)
+	session, err := mcpClient.Connect(ctx, t2, nil)
+	require.NoError(t, err)
+
+	return session, func() {
+		_ = session.Close()
+		stub.Close()
+	}
+}
+
+// TestIntegration_ReplyComment covers the read-then-reply journey end to
+// end — the entire point of the comment-threading feature, and a journey no
+// unit test spans since Task 7/8's read tests and Task 9's write tests each
+// cover one half in isolation. It reads inline comments for a page, parses
+// the comment ID and its (type: ...) label out of the *rendered* output
+// exactly as an agent would (not hardcoded independently of what the read
+// returned), then feeds both back into a reply_comment write and confirms
+// the reply threaded under its parent rather than posting as a new
+// top-level footer comment (the originally reported defect).
+func TestIntegration_ReplyComment(t *testing.T) {
+	t.Run("read then reply threads under the parent, not as a new footer comment", func(t *testing.T) {
+		stub := newStubReplyServer(t, "ic-42")
+		cs, cleanup := newReplyMCPSession(t, stub.srv)
+		defer cleanup()
+		ctx := context.Background()
+
+		// Step 1: read inline comments for the page.
+		readResult, err := cs.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "confluence_read",
+			Arguments: map[string]any{"resource": "inline_comments", "page_id": "101"},
+		})
+		require.NoError(t, err)
+		require.False(t, readResult.IsError)
+		readText := readResult.Content[0].(*mcp.TextContent).Text
+
+		// Step 2: parse the comment ID and comment_type out of the rendered
+		// output — the way an agent would. This is what makes the test fail
+		// if the read ever stops emitting the label.
+		match := commentIDLineRe.FindStringSubmatch(readText)
+		require.NotNil(t, match, "expected the read output to contain a **Comment ID:** ... (type: ...) label:\n%s", readText)
+		parentID, commentType := match[1], match[2]
+		assert.Equal(t, "ic-42", parentID)
+		assert.Equal(t, "inline", commentType)
+
+		// Step 3: reply using exactly what the read reported.
+		writeResult, err := cs.CallTool(ctx, &mcp.CallToolParams{
+			Name: "confluence_write",
+			Arguments: map[string]any{
+				"action": "reply_comment",
+				"items": []any{map[string]any{
+					"parent_comment_id": parentID,
+					"comment_type":      commentType,
+					"body":              "Good catch — added.",
+				}},
+			},
+		})
+		require.NoError(t, err)
+		assert.False(t, writeResult.IsError)
+
+		// Step 4: the reply must have threaded via the inline-comments
+		// endpoint, and must NOT have posted as a new top-level footer
+		// comment — the regression guard for the original defect.
+		assert.Equal(t, 1, stub.inlineReplyPosts, "reply should POST to /inline-comments")
+		assert.Equal(t, 0, stub.footerPosts, "reply must not post as a new top-level footer comment")
+	})
+
+	t.Run("dry run fires no client call", func(t *testing.T) {
+		stub := newStubReplyServer(t, "ic-42")
+		cs, cleanup := newReplyMCPSession(t, stub.srv)
+		defer cleanup()
+		ctx := context.Background()
+
+		result, err := cs.CallTool(ctx, &mcp.CallToolParams{
+			Name: "confluence_write",
+			Arguments: map[string]any{
+				"action":  "reply_comment",
+				"dry_run": true,
+				"items": []any{map[string]any{
+					"parent_comment_id": "ic-42",
+					"comment_type":      "inline",
+					"body":              "Would-be reply",
+				}},
+			},
+		})
+		require.NoError(t, err)
+		assert.False(t, result.IsError)
+		text := result.Content[0].(*mcp.TextContent).Text
+		assert.Contains(t, text, "Would add")
+
+		assert.Equal(t, 0, stub.inlineReplyPosts)
+		assert.Equal(t, 0, stub.footerPosts)
+	})
 }
