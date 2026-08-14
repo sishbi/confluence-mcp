@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.12](https://github.com/sishbi/confluence-mcp/compare/v0.0.11...v0.0.12) (2026-08-14)
+
+
+### Bug Fixes
+
+* stop replace_section deleting nested subsections ([#33](https://github.com/sishbi/confluence-mcp/issues/33)) ([eda79f7](https://github.com/sishbi/confluence-mcp/commit/eda79f70dfaa920f578f545fc0c6275329867f39))
+
 ## [0.0.11](https://github.com/sishbi/confluence-mcp/compare/v0.0.10...v0.0.11) (2026-08-14)
 
 
