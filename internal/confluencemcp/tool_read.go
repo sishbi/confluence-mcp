@@ -145,43 +145,159 @@ type ReadArgs struct {
 	ResolutionStatus []string `json:"resolution_status,omitempty" jsonschema:"Filters inline comment threads by resolution state (resource: \"inline_comments\" only). Valid values: open, resolved, dangling, reopened."`
 }
 
+// resolvedPageIDs returns the union of PageIDs and PageID, deduplicated, so
+// callers of section/next_page_token can honour either spelling of the
+// page-id argument.
+func (a ReadArgs) resolvedPageIDs() []string {
+	ids := make([]string, 0, len(a.PageIDs)+1)
+	seen := make(map[string]bool, len(a.PageIDs)+1)
+	for _, id := range a.PageIDs {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	if a.PageID != "" && !seen[a.PageID] {
+		ids = append(ids, a.PageID)
+	}
+	return ids
+}
+
+// joinModeNames renders a list of argument names as a natural-language list
+// ("a and b", "a, b, and c") for use in mutually-exclusive-argument errors.
+func joinModeNames(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " and " + names[1]
+	default:
+		return strings.Join(names[:len(names)-1], ", ") + ", and " + names[len(names)-1]
+	}
+}
+
+// mutuallyExclusiveMessage builds the shared "these arguments are mutually
+// exclusive" wording used both for the top-level mode dispatch and for the
+// section-specific rejections, so the two never drift in phrasing.
+func mutuallyExclusiveMessage(names ...string) string {
+	return fmt.Sprintf("%s are mutually exclusive — provide exactly one", joinModeNames(names))
+}
+
+// pageIDArgNames reports which page-id spellings are actually populated on
+// args, so a mutually-exclusive error can name the real collision (e.g.
+// "page_ids and page_id") instead of a hard-coded spelling that may not be
+// the one the caller used.
+func pageIDArgNames(args ReadArgs) []string {
+	var names []string
+	if len(args.PageIDs) > 0 {
+		names = append(names, "page_ids")
+	}
+	if args.PageID != "" {
+		names = append(names, "page_id")
+	}
+	return names
+}
+
 // handleRead dispatches to the appropriate read sub-method based on the args.
 func (h *handlers) handleRead(ctx context.Context, _ *mcp.CallToolRequest, args ReadArgs) (*mcp.CallToolResult, any, error) {
-	// Section extraction from cache takes priority.
-	if args.Section != "" && args.PageID != "" {
-		return h.readSectionFromCache(args)
+	resolvedIDs := args.resolvedPageIDs()
+
+	// Section extraction takes priority, from either page-id spelling. This
+	// block is terminal — every branch returns — so no argument combination
+	// can fall through to a mode that would silently ignore section.
+	if args.Section != "" {
+		if len(resolvedIDs) > 1 {
+			names := append([]string{"section"}, pageIDArgNames(args)...)
+			return textResult(mutuallyExclusiveMessage(names...)+" (section needs exactly one page id)", true), nil, nil
+		}
+		if args.CQL != "" {
+			return textResult(mutuallyExclusiveMessage("section", "cql"), true), nil, nil
+		}
+		if args.Resource != "" {
+			return textResult(mutuallyExclusiveMessage("section", "resource"), true), nil, nil
+		}
+		if args.URL != "" {
+			return textResult(mutuallyExclusiveMessage("section", "url"), true), nil, nil
+		}
+		if args.NextPageToken != "" {
+			return textResult(mutuallyExclusiveMessage("section", "next_page_token"), true), nil, nil
+		}
+		if args.Format == "storage" {
+			return textResult(`section does not support format="storage" — section extraction always returns Markdown`, true), nil, nil
+		}
+		// limit paginates the cql and resource listings; a section is returned
+		// whole, so a limit here would otherwise be silently ignored.
+		if args.Limit != 0 {
+			return textResult("section does not support limit — a section is always returned in full", true), nil, nil
+		}
+		if len(resolvedIDs) != 1 {
+			return textResult("section requires exactly one page id — provide page_id or a single-element page_ids", true), nil, nil
+		}
+		return h.readSection(ctx, resolvedIDs[0], args.Section)
 	}
 
-	// Chunk continuation: token alone, no other primary mode.
-	if args.NextPageToken != "" && len(args.PageIDs) == 0 && args.URL == "" &&
-		args.CQL == "" && args.Resource == "" {
-		return h.readNextChunk(ctx, args.NextPageToken)
+	// Chunk continuation: token alone, no mode that owns its own pagination
+	// cursor (cql/resource already consume next_page_token as
+	// ListOptions.Cursor further down). url is handled separately below — it
+	// has no cursor of its own, so it continues a chunked read instead.
+	if args.NextPageToken != "" && args.URL == "" && args.CQL == "" && args.Resource == "" {
+		return h.readNextChunk(ctx, args.NextPageToken, resolvedIDs)
 	}
 
-	// Count active modes.
-	modes := 0
+	// url + token continues a chunked read: readByURL delegates to readByIDs,
+	// which ignores next_page_token, so left unguarded the token is silently
+	// dropped and chunk 1 returned. An agent that reached the page by URL
+	// holds that URL as its handle for the page, and renderChunk's own
+	// continuation hint never tells it to drop url — so the URL's page id is
+	// treated as just another supplied id and checked for agreement with the
+	// token, exactly as page_ids is. A focusedCommentId permalink has no
+	// continuation semantics and is rejected.
+	if args.NextPageToken != "" && args.URL != "" && args.CQL == "" && args.Resource == "" {
+		info, err := parseConfluenceURL(args.URL)
+		if err != nil {
+			return textResult(fmt.Sprintf("invalid Confluence URL: %v", err), true), nil, nil
+		}
+		if info.commentID != "" {
+			return textResult("next_page_token cannot continue a focusedCommentId permalink — drop url to continue the chunked read", true), nil, nil
+		}
+		expected := slices.Clone(resolvedIDs)
+		if !slices.Contains(expected, info.pageID) {
+			expected = append(expected, info.pageID)
+		}
+		return h.readNextChunk(ctx, args.NextPageToken, expected)
+	}
+
+	// Count active modes, keeping their names for the mutually-exclusive error.
+	var modeNames []string
 	if len(args.PageIDs) > 0 {
-		modes++
+		modeNames = append(modeNames, "page_ids")
 	}
 	if args.URL != "" {
-		modes++
+		modeNames = append(modeNames, "url")
 	}
 	if args.CQL != "" {
-		modes++
+		modeNames = append(modeNames, "cql")
 	}
 	if args.Resource != "" {
-		modes++
+		modeNames = append(modeNames, "resource")
 	}
 
-	if modes == 0 {
+	if len(modeNames) == 0 {
 		return textResult("provide exactly one of: page_ids, url, cql, resource", true), nil, nil
 	}
-	if modes > 1 {
-		return textResult("page_ids, url, cql, and resource are mutually exclusive — provide exactly one", true), nil, nil
+	if len(modeNames) > 1 {
+		return textResult(mutuallyExclusiveMessage(modeNames...), true), nil, nil
 	}
 
 	switch {
 	case len(args.PageIDs) > 0:
+		if args.PageID != "" && !slices.Contains(args.PageIDs, args.PageID) {
+			return textResult(fmt.Sprintf(
+				"page_ids %v and page_id %q disagree — provide matching values or drop one", args.PageIDs, args.PageID,
+			), true), nil, nil
+		}
 		return h.readByIDs(ctx, args)
 	case args.URL != "":
 		return h.readByURL(ctx, args)
@@ -192,15 +308,25 @@ func (h *handlers) handleRead(ctx context.Context, _ *mcp.CallToolRequest, args 
 	}
 }
 
-// readSectionFromCache extracts a named section from a cached page.
-func (h *handlers) readSectionFromCache(args ReadArgs) (*mcp.CallToolResult, any, error) {
-	cached, ok := h.cache.get(args.PageID)
+// readSection extracts a named section from a page, fetching and caching the
+// page first on a cache miss (mirrors readNextChunk's cache-miss handling).
+func (h *handlers) readSection(ctx context.Context, pageID, sectionName string) (*mcp.CallToolResult, any, error) {
+	cached, ok := h.cache.get(pageID)
 	if !ok {
-		return textResult(fmt.Sprintf("page %s not in cache — fetch it first with page_ids or url", args.PageID), true), nil, nil
+		h.logger().DebugContext(ctx, "cache_miss", "page_id", pageID, "type", "section")
+		page, err := h.client.GetPage(ctx, pageID)
+		if err != nil {
+			return textResult(fmt.Sprintf("error fetching page %s: %v", pageID, err), true), nil, nil
+		}
+		_ = h.processPage(ctx, page)
+		cached, ok = h.cache.get(pageID)
+		if !ok {
+			return textResult(fmt.Sprintf("unable to cache page %s for section extraction", pageID), true), nil, nil
+		}
 	}
-	content := extractSection(cached.markdown, cached.sections, args.Section)
+	content := extractSection(cached.markdown, cached.sections, sectionName)
 	if content == "" {
-		return textResult(fmt.Sprintf("section %q not found in page %s", args.Section, args.PageID), true), nil, nil
+		return textResult(fmt.Sprintf("section %q not found in page %s", sectionName, pageID), true), nil, nil
 	}
 	return textResult(content, false), nil, nil
 }
@@ -286,14 +412,27 @@ func renderChunk(markdown string, sections []section, pageID string, cursor *chu
 
 // readNextChunk resumes a chunked page read using a base64url-encoded cursor.
 // The page is served from cache when possible; otherwise it is re-fetched and
-// re-cached transparently.
-func (h *handlers) readNextChunk(ctx context.Context, token string) (*mcp.CallToolResult, any, error) {
+// re-cached transparently. expected carries the page ids the caller supplied
+// alongside the token (resolvedPageIDs() of the request, or nil when none
+// were supplied) — the token already carries its own page id, so a caller
+// that names a different or additional page id gets an explicit error rather
+// than the token's page id being silently substituted or a supplied id being
+// silently dropped.
+func (h *handlers) readNextChunk(ctx context.Context, token string, expected []string) (*mcp.CallToolResult, any, error) {
 	cursor, err := decodeChunkToken(token)
 	if err != nil {
 		return textResult(fmt.Sprintf("invalid next_page_token: %v", err), true), nil, nil
 	}
 	if cursor.PageID == "" {
 		return textResult("next_page_token is missing page_id", true), nil, nil
+	}
+	if len(expected) > 0 && !slices.Contains(expected, cursor.PageID) {
+		return textResult(fmt.Sprintf(
+			"next_page_token addresses page %s, which is not among the page ids supplied — the token carries its own page id",
+			cursor.PageID), true), nil, nil
+	}
+	if len(expected) > 1 {
+		return textResult("next_page_token continues a single page — supply at most one page id alongside it", true), nil, nil
 	}
 
 	cached, ok := h.cache.get(cursor.PageID)

@@ -456,23 +456,332 @@ func TestHandleRead_LongPageChunked(t *testing.T) {
 	assert.Contains(t, text, "section")
 }
 
-func TestHandleRead_SectionFromCache(t *testing.T) {
-	h := &handlers{client: &mockClient{}}
-	// Pre-populate cache with a page that has sections
+// TestHandleRead_SectionHonouredForBothPageIDSpellings covers the bug where
+// section was silently ignored whenever the caller used page_ids (the
+// documented primary mode) instead of the singular page_id — dispatch fell
+// through to readByIDs, which does not know about Section at all.
+func TestHandleRead_SectionHonouredForBothPageIDSpellings(t *testing.T) {
 	md := "# Introduction\n\nIntro text.\n\n## Details\n\nDetail content.\n\n## Conclusion\n\nFinal."
-	h.cache.put(&cachedPage{
-		pageID:    "123",
-		markdown:  md,
-		sections:  parseSections(md),
-		fetchedAt: time.Now(),
-	})
+
+	cases := []struct {
+		name string
+		args ReadArgs
+	}{
+		{name: "page_id only", args: ReadArgs{PageID: "123", Section: "Details"}},
+		{name: "page_ids single", args: ReadArgs{PageIDs: []string{"123"}, Section: "Details"}},
+		{name: "page_ids single + page_id same", args: ReadArgs{PageIDs: []string{"123"}, PageID: "123", Section: "Details"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &handlers{client: &mockClient{}}
+			h.cache.put(&cachedPage{
+				pageID:    "123",
+				markdown:  md,
+				sections:  parseSections(md),
+				fetchedAt: time.Now(),
+			})
+
+			result, _, err := h.handleRead(context.Background(), nil, tc.args)
+			require.NoError(t, err)
+			require.False(t, result.IsError)
+			text := firstText(t, result)
+			assert.Contains(t, text, "Detail content.")
+			assert.NotContains(t, text, "Final.")
+			assert.NotContains(t, text, "Table of Contents", "a section hit must not fall through to the chunked/TOC response")
+		})
+	}
+}
+
+// TestHandleRead_SectionRejectsUnservableArgs covers combinations that
+// section cannot serve — more than one resolved page id, or a section
+// request paired with cql or resource, which each already claim
+// next_page_token/dispatch for themselves. Each must surface an explicit
+// error, never a silent fall-through to a different mode.
+func TestHandleRead_SectionRejectsUnservableArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args ReadArgs
+		want string
+	}{
+		{
+			name: "section + two page_ids",
+			args: ReadArgs{Section: "Details", PageIDs: []string{"1", "2"}},
+			want: "page_ids",
+		},
+		{
+			name: "section + cql",
+			args: ReadArgs{Section: "Details", PageID: "1", CQL: "type=page"},
+			want: "cql",
+		},
+		{
+			name: "section + resource",
+			args: ReadArgs{Section: "Details", PageID: "1", Resource: "children"},
+			want: "resource",
+		},
+		{
+			name: "section + url",
+			args: ReadArgs{Section: "Details", URL: "https://company.atlassian.net/wiki/spaces/DEV/pages/1/Title"},
+			want: "url",
+		},
+		{
+			name: "bare section with no page id",
+			args: ReadArgs{Section: "Details"},
+			want: "exactly one page id",
+		},
+		{
+			name: "section + next_page_token",
+			args: ReadArgs{Section: "Details", PageID: "1", NextPageToken: "sometoken"},
+			want: "next_page_token",
+		},
+		{
+			name: "section + format=storage",
+			args: ReadArgs{Section: "Details", PageID: "1", Format: "storage"},
+			want: `format="storage"`,
+		},
+		{
+			name: "section + limit",
+			args: ReadArgs{Section: "Details", PageID: "1", Limit: 1},
+			want: "limit",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// A servable client, deliberately: the cases that reach the
+			// client without their guard (section + format/limit) must fail
+			// on the assertion below rather than on a nil-mock panic, so the
+			// test pins the rejection and not merely "something went wrong".
+			fetched := 0
+			h := &handlers{
+				client: &mockClient{
+					GetPageFn: func(ctx context.Context, id string) (*confluence.Page, error) {
+						fetched++
+						return &confluence.Page{
+							ID:    id,
+							Title: "T",
+							Body:  confluence.PageBody{Storage: confluence.StorageBody{Value: "<h1>Details</h1><p>Body.</p>"}},
+						}, nil
+					},
+				},
+			}
+			result, _, err := h.handleRead(context.Background(), nil, tc.args)
+			require.NoError(t, err)
+			require.True(t, result.IsError, "an unservable section combination must be a hard error, not a silent fall-through")
+			assert.Zero(t, fetched, "an unservable combination must be rejected before any page is fetched")
+			text := firstText(t, result)
+			assert.Contains(t, text, "section")
+			assert.Contains(t, text, tc.want)
+		})
+	}
+}
+
+// TestHandleRead_SectionRejectsPageIDCollisionNamingBothSpellings covers I4:
+// when section collides with two disagreeing page ids supplied under
+// different spellings (page_ids vs page_id), the error must name both real
+// spellings rather than hard-coding "page_ids and section".
+func TestHandleRead_SectionRejectsPageIDCollisionNamingBothSpellings(t *testing.T) {
+	h := &handlers{client: &mockClient{}}
+	args := ReadArgs{Section: "Details", PageIDs: []string{"1"}, PageID: "2"}
+	result, _, err := h.handleRead(context.Background(), nil, args)
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	text := firstText(t, result)
+	assert.Contains(t, text, "page_ids", "the collision is page_ids vs page_id, not section vs page_ids")
+	assert.Contains(t, text, "page_id", "the collision is page_ids vs page_id, not section vs page_ids")
+}
+
+// TestHandleRead_PageIDsAndPageIDDisagree covers I3: page_ids and a
+// disagreeing page_id used to be silently resolved by ignoring page_id and
+// fetching only the ids in page_ids.
+func TestHandleRead_PageIDsAndPageIDDisagree(t *testing.T) {
+	h := &handlers{client: &mockClient{}}
+	args := ReadArgs{PageIDs: []string{"A"}, PageID: "B"}
+	result, _, err := h.handleRead(context.Background(), nil, args)
+	require.NoError(t, err)
+	require.True(t, result.IsError, "a disagreeing page_id must be rejected, not silently dropped")
+	text := firstText(t, result)
+	assert.Contains(t, text, "A")
+	assert.Contains(t, text, "B")
+}
+
+// TestHandleRead_SectionFetchesOnCacheMiss covers the secondary defect: a
+// cold page_id + section call used to error with "not in cache — fetch it
+// first" even though the handler holds a client that can fetch the page
+// itself.
+func TestHandleRead_SectionFetchesOnCacheMiss(t *testing.T) {
+	calls := 0
+	h := &handlers{
+		client: &mockClient{
+			GetPageFn: func(ctx context.Context, id string) (*confluence.Page, error) {
+				calls++
+				assert.Equal(t, "123", id)
+				return &confluence.Page{
+					ID:    id,
+					Title: "Test",
+					Body: confluence.PageBody{Storage: confluence.StorageBody{
+						Value: "<h1>Introduction</h1><p>Intro.</p><h2>Details</h2><p>Detail content.</p>",
+					}},
+					Version: confluence.PageVersion{Number: 1},
+				}, nil
+			},
+		},
+	}
 
 	args := ReadArgs{PageID: "123", Section: "Details"}
 	result, _, err := h.handleRead(context.Background(), nil, args)
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
 	text := firstText(t, result)
 	assert.Contains(t, text, "Detail content.")
-	assert.NotContains(t, text, "Final.")
+	assert.Equal(t, 1, calls, "cache miss must fetch the page exactly once")
+
+	// A section genuinely absent from the fetched page must still 404.
+	args2 := ReadArgs{PageID: "123", Section: "Nonexistent"}
+	result2, _, err := h.handleRead(context.Background(), nil, args2)
+	require.NoError(t, err)
+	require.True(t, result2.IsError)
+	assert.Contains(t, firstText(t, result2), `section "Nonexistent" not found`)
+	assert.Equal(t, 1, calls, "a second section lookup must be served from the now-warm cache, not refetched")
+}
+
+// TestHandleRead_NextPageTokenWithPageIDs covers the bug where a
+// next_page_token was silently dropped whenever page_ids was also set,
+// re-fetching chunk 1 instead of the requested continuation. It also
+// verifies the guard's widening did not accidentally break cql's own
+// legitimate use of next_page_token as its pagination cursor.
+func TestHandleRead_NextPageTokenWithPageIDs(t *testing.T) {
+	t.Run("page_ids + token returns the chunk the token addresses", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		md := "# S1\n\nOne.\n\n# S2\n\nTwo."
+		h.cache.put(&cachedPage{pageID: "123", markdown: md, sections: parseSections(md), fetchedAt: time.Now()})
+		token, err := encodeChunkToken(chunkCursor{PageID: "123", Mode: "section", SectionIdx: 1})
+		require.NoError(t, err)
+
+		args := ReadArgs{PageIDs: []string{"123"}, NextPageToken: token}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		text := firstText(t, result)
+		assert.Contains(t, text, "continuation", "token must route to chunk continuation, not re-fetch chunk 1")
+		assert.Contains(t, text, "S2")
+		assert.NotContains(t, text, "One.", "the addressed chunk must not re-include the first section's body")
+	})
+
+	t.Run("token + cql is cql's own pagination cursor, not chunk continuation", func(t *testing.T) {
+		var receivedCursor string
+		h := &handlers{
+			client: &mockClient{
+				SearchContentFn: func(ctx context.Context, cql string, opts *confluence.ListOptions) (*confluence.SearchResult, error) {
+					receivedCursor = opts.Cursor
+					return &confluence.SearchResult{}, nil
+				},
+			},
+		}
+		args := ReadArgs{CQL: "type=page", NextPageToken: "cursor-abc"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError, "cql + next_page_token is a legitimate CQL continuation, not an error")
+		assert.Equal(t, "cursor-abc", receivedCursor, "widening chunk continuation to page_ids must not hijack cql's own cursor")
+	})
+
+	t.Run("token + resource=children is children's own pagination cursor, not chunk continuation", func(t *testing.T) {
+		var receivedCursor string
+		h := &handlers{
+			client: &mockClient{
+				GetPageChildrenFn: func(ctx context.Context, id string, opts *confluence.ListOptions) ([]confluence.Page, string, error) {
+					receivedCursor = opts.Cursor
+					return nil, "", nil
+				},
+			},
+		}
+		args := ReadArgs{Resource: "children", PageID: "123", NextPageToken: "cursor-xyz"}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError, "resource=children + next_page_token is a legitimate continuation, not an error")
+		assert.Equal(t, "cursor-xyz", receivedCursor, "widening chunk continuation to page_ids must not hijack resource's own cursor")
+	})
+
+	t.Run("page_ids [A] + token for B is rejected, not silently swapped to B", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		token, err := encodeChunkToken(chunkCursor{PageID: "B", Mode: "section", SectionIdx: 0})
+		require.NoError(t, err)
+
+		args := ReadArgs{PageIDs: []string{"A"}, NextPageToken: token}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.True(t, result.IsError, "a token addressing a page the caller did not name must be rejected")
+		text := firstText(t, result)
+		assert.Contains(t, text, "B")
+	})
+
+	t.Run("page_ids [A,B] + token for A is rejected, not silently narrowed to A", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		token, err := encodeChunkToken(chunkCursor{PageID: "A", Mode: "section", SectionIdx: 0})
+		require.NoError(t, err)
+
+		args := ReadArgs{PageIDs: []string{"A", "B"}, NextPageToken: token}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.True(t, result.IsError, "a token continues a single page — more than one supplied page id must be rejected")
+	})
+
+	t.Run("token + url naming the token's page continues the chunked read", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		md := "# S1\n\nOne.\n\n# S2\n\nTwo."
+		h.cache.put(&cachedPage{pageID: "123", markdown: md, sections: parseSections(md), fetchedAt: time.Now()})
+		token, err := encodeChunkToken(chunkCursor{PageID: "123", Mode: "section", SectionIdx: 1})
+		require.NoError(t, err)
+
+		args := ReadArgs{URL: "https://example.atlassian.net/wiki/spaces/DEV/pages/123/Title", NextPageToken: token}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.False(t, result.IsError, "a url naming the token's own page must continue the read, not error")
+		text := firstText(t, result)
+		assert.Contains(t, text, "continuation", "the token must route to chunk continuation, not a full re-fetch")
+		assert.Contains(t, text, "S2")
+		assert.NotContains(t, text, "One.", "the addressed chunk must not re-include the first section's body")
+	})
+
+	t.Run("token + url naming a different page is rejected, not silently dropped", func(t *testing.T) {
+		fetched := 0
+		h := &handlers{
+			client: &mockClient{
+				GetPageFn: func(ctx context.Context, id string) (*confluence.Page, error) {
+					fetched++
+					return &confluence.Page{
+						ID:    id,
+						Title: "T",
+						Body:  confluence.PageBody{Storage: confluence.StorageBody{Value: "<h1>S1</h1><p>One.</p>"}},
+					}, nil
+				},
+			},
+		}
+		token, err := encodeChunkToken(chunkCursor{PageID: "999", Mode: "section", SectionIdx: 1})
+		require.NoError(t, err)
+
+		args := ReadArgs{URL: "https://example.atlassian.net/wiki/spaces/DEV/pages/123/Title", NextPageToken: token}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.True(t, result.IsError, "a token addressing a page the url does not name must be rejected")
+		assert.Zero(t, fetched, "the mismatch must be caught before any page is fetched")
+		assert.Contains(t, firstText(t, result), "999")
+	})
+
+	t.Run("token + focusedCommentId permalink is rejected", func(t *testing.T) {
+		h := &handlers{client: &mockClient{}}
+		token, err := encodeChunkToken(chunkCursor{PageID: "123", Mode: "section", SectionIdx: 1})
+		require.NoError(t, err)
+
+		args := ReadArgs{
+			URL:           "https://example.atlassian.net/wiki/spaces/DEV/pages/123/Title?focusedCommentId=456",
+			NextPageToken: token,
+		}
+		result, _, err := h.handleRead(context.Background(), nil, args)
+		require.NoError(t, err)
+		require.True(t, result.IsError, "a comment permalink has no chunk-continuation semantics")
+		assert.Contains(t, firstText(t, result), "focusedCommentId")
+	})
 }
 
 func TestHandleRead_ListChildren(t *testing.T) {
@@ -1218,7 +1527,7 @@ func TestChunkingTokenRoundtripSingleLongSection(t *testing.T) {
 
 func TestReadNextChunk_InvalidToken(t *testing.T) {
 	h := &handlers{client: &mockClient{}}
-	result, _, err := h.readNextChunk(context.Background(), "not-valid-base64!!!")
+	result, _, err := h.readNextChunk(context.Background(), "not-valid-base64!!!", nil)
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
 	assert.Contains(t, firstText(t, result), "invalid next_page_token")
@@ -1229,7 +1538,7 @@ func TestReadNextChunk_TokenMissingPageID(t *testing.T) {
 	require.NoError(t, err)
 
 	h := &handlers{client: &mockClient{}}
-	result, _, err := h.readNextChunk(context.Background(), token)
+	result, _, err := h.readNextChunk(context.Background(), token, nil)
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
 	assert.Contains(t, firstText(t, result), "missing page_id")
@@ -1244,7 +1553,7 @@ func TestReadNextChunk_CacheMiss_RefetchError(t *testing.T) {
 			return nil, assert.AnError
 		},
 	}}
-	result, _, err := h.readNextChunk(context.Background(), token)
+	result, _, err := h.readNextChunk(context.Background(), token, nil)
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
 	assert.Contains(t, firstText(t, result), "error fetching page")
@@ -1271,7 +1580,7 @@ func TestReadNextChunk_CacheMiss_SilentRefetch(t *testing.T) {
 	token, err := encodeChunkToken(chunkCursor{PageID: "p1", Mode: "section", SectionIdx: 1})
 	require.NoError(t, err)
 
-	result, _, err := h.readNextChunk(context.Background(), token)
+	result, _, err := h.readNextChunk(context.Background(), token, nil)
 	require.NoError(t, err)
 	assert.False(t, result.IsError, "cache-miss continuation should silently refetch and succeed")
 	text := firstText(t, result)
