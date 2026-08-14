@@ -10,43 +10,73 @@ import (
 // found the stop point.
 var errStopWalk = errors.New("stop walk")
 
-// findSectionEnd walks body starting from match's heading and determines the
-// stop offset for the section: the byte offset where the section's content
-// ends. This is the boundary used both by replace-section (to know what to
-// remove) and by end-of-section (to know where to insert).
+// sectionExtent describes the region a section-scoped splice covers.
+type sectionExtent struct {
+	// stop is the byte offset where the covered region ends.
+	stop int
+	// replacedTags holds the element local-names of the top-level siblings
+	// between the heading and stop, in document order.
+	replacedTags []string
+	// nestedHeadings holds the text of the deeper headings inside the FULL
+	// section (i.e. up to the next same-or-higher-level heading), regardless of
+	// where stop landed. When stop is the narrow boundary these are the
+	// subsections left intact; when it is the full boundary they are the
+	// subsections being removed. Callers label them accordingly.
+	nestedHeadings []string
+}
+
+// findSectionExtent walks body starting from match's heading and determines
+// the region the section-scoped splice covers. It is used by replace-section
+// (to know what to remove) and by end-of-section (to know where to insert).
 //
-// The stop conditions, evaluated in document order after the heading's
-// closing tag:
-//   - A heading start at level <= match.level, at the same layoutCellDepth,
-//     macroDepth, and unsafeContainerDepth as the target heading — stop at
-//     that heading's start. The unsafeContainerDepth check matters because
-//     the unsafeContainerTags (see splice_walker.go) don't move
-//     layoutCellDepth or macroDepth, so a heading buried in one of them
-//     would otherwise be taken as the stop.
-//   - The close of the containing ac:layout-cell, when the target heading is
-//     itself inside a layout-cell (targetLayoutDepth > 0) — stop at the close
-//     tag's start. layoutCellDepth is a per-tag LIFO counter, so the first
-//     close at the target's depth is the target's own cell.
-//   - Otherwise, the stop offset defaults to len(body) (no-layout case).
+// Two candidate stop points are tracked:
+//   - the FULL stop — the first heading start at level <= match.level, or the
+//     close of the containing ac:layout-cell, or the end of the body;
+//   - the NARROW stop — the first heading start of ANY level, i.e. the start
+//     of the section's first subsection.
 //
-// Along the way, findSectionEnd also collects the element local-names of the
+// includeSubsections selects between them: false (replace-section's default)
+// covers only up to the first subsection, so replacing a section does not
+// silently delete its subsections; true covers the whole section, which is
+// also what end-of-section always wants (its insert belongs after the last
+// subsection, not before the first).
+//
+// Heading stops are only taken at the same layoutCellDepth, macroDepth, and
+// unsafeContainerDepth as the target heading. The unsafeContainerDepth check
+// matters because the unsafeContainerTags (see splice_walker.go) don't move
+// layoutCellDepth or macroDepth, so a heading buried in one of them would
+// otherwise be taken as the stop. layoutCellDepth is a per-tag LIFO counter,
+// so the first layout-cell close at the target's depth is the target's own
+// cell.
+//
+// Along the way, findSectionExtent collects the element local-names of the
 // top-level siblings between the heading and the stop offset — i.e. elements
 // that isTopLevelSibling considers direct siblings of the target heading
 // (layoutCellDepth, macroDepth, and unsafeContainerDepth all in step with the
 // target; see that function for the full three-dimensional rule) — for the
 // replaced-element summary used by replace-section.
-func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags []string, err error) {
+func findSectionExtent(body string, match headingMatch, includeSubsections bool) (sectionExtent, error) {
 	targetLayoutDepth := match.layoutCellDepth
-	targetMacroDepth := match.macroDepth
-	targetUnsafeContainerDepth := match.unsafeContainerDepth
 	targetLevel := match.level
-	var topLevelStarted bool
-	stopOff = len(body) // default: end of body (no-layout case)
+	fullStop := len(body) // default: end of body (no-layout case)
+	narrowStop := -1      // -1 until a subsection heading is seen
+	nestedStart := -1     // open subsection heading awaiting its closing tag
+	var (
+		nestedHeadings  []string
+		topLevelStarted bool
+	)
 	// topLevelStarted tracks whether we've entered a top-level element. When we
 	// see a start-element that isTopLevelSibling reports as a sibling of
 	// match, and we're not already inside one, it's a new top-level element.
-	// We append its name once, then ignore further starts until we leave it.
+	// We record its name once, then ignore further starts until we leave it.
 	topLevelOpenTag := ""
+	// Tags are recorded with their offsets so they can be trimmed to whichever
+	// stop is selected below.
+	type tagAt struct {
+		name string
+		off  int
+	}
+	var tags []tagAt
 
 	walkErr := walkStorage(body, func(ev walkEvent) error {
 		// Ignore anything before the heading's closing tag.
@@ -56,17 +86,28 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 
 		// Check stop conditions first — evaluated on every event.
 		if ev.kind == eventHeadingStart &&
-			ev.level <= targetLevel &&
 			ev.layoutCellDepth == targetLayoutDepth &&
-			ev.macroDepth == targetMacroDepth &&
-			ev.unsafeContainerDepth == targetUnsafeContainerDepth {
-			stopOff = ev.tokStart
-			return errStopWalk
+			ev.macroDepth == match.macroDepth &&
+			ev.unsafeContainerDepth == match.unsafeContainerDepth {
+			if ev.level <= targetLevel {
+				fullStop = ev.tokStart
+				return errStopWalk
+			}
+			// A subsection: the narrow stop, and one of the nested headings
+			// reported back to the caller.
+			if narrowStop < 0 {
+				narrowStop = ev.tokStart
+			}
+			nestedStart = ev.tokStart
+		}
+		if ev.kind == eventHeadingEnd && nestedStart >= 0 {
+			nestedHeadings = append(nestedHeadings, normalizeHeading(extractText(body[nestedStart:ev.tokEnd])))
+			nestedStart = -1
 		}
 		// Exiting the containing layout-cell: stop at its close tag.
 		if ev.kind == eventEnd && ev.name == "layout-cell" &&
 			ev.layoutCellDepth == targetLayoutDepth && targetLayoutDepth > 0 {
-			stopOff = ev.tokStart
+			fullStop = ev.tokStart
 			return errStopWalk
 		}
 
@@ -76,7 +117,7 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 		switch ev.kind {
 		case eventStart, eventHeadingStart:
 			if !topLevelStarted && isTopLevelSibling(ev, match) {
-				replacedTags = append(replacedTags, ev.name)
+				tags = append(tags, tagAt{name: ev.name, off: ev.tokStart})
 				topLevelStarted = true
 				topLevelOpenTag = ev.name
 			}
@@ -90,10 +131,19 @@ func findSectionEnd(body string, match headingMatch) (stopOff int, replacedTags 
 		return nil
 	})
 	if walkErr != nil && !errors.Is(walkErr, errStopWalk) {
-		return 0, nil, fmt.Errorf("walk body: %w", walkErr)
+		return sectionExtent{}, fmt.Errorf("walk body: %w", walkErr)
 	}
 
-	return stopOff, replacedTags, nil
+	ext := sectionExtent{stop: fullStop, nestedHeadings: nestedHeadings}
+	if !includeSubsections && narrowStop >= 0 {
+		ext.stop = narrowStop
+	}
+	for _, t := range tags {
+		if t.off < ext.stop {
+			ext.replacedTags = append(ext.replacedTags, t.name)
+		}
+	}
+	return ext, nil
 }
 
 // isTopLevelSibling reports whether ev is a direct sibling of match's heading
@@ -122,13 +172,16 @@ func isTopLevelSibling(ev walkEvent, match headingMatch) bool {
 
 // sectionStopAnchor derives the container name and an anchor phrase
 // describing where a section-scoped splice (replace-section or
-// end-of-section) stopped, per the shared findSectionEnd heuristic: if the
+// end-of-section) stopped, per the shared findSectionExtent heuristic: if the
 // stop offset lands on a heading start rather than the close of the
-// containing ac:layout-cell or the end of the body, describe it as "before
-// next heading at same or higher level"; otherwise describe it as the end of
-// the container. Shared by spliceReplaceSection and spliceEndOfSection so the
-// phrasing stays identical across both modes.
-func sectionStopAnchor(body string, stopOff int, targetLayoutDepth int) (anchor, container string) {
+// containing ac:layout-cell or the end of the body, describe which heading
+// stopped it; otherwise describe it as the end of the container.
+//
+// stopAtAnyHeading must mirror the extent the caller asked for: a
+// replace-section that keeps its subsections stops at the next heading of ANY
+// level, and saying "at same or higher level" there is precisely the wording
+// that made the old subsection-swallowing behaviour look intentional and safe.
+func sectionStopAnchor(body string, stopOff int, targetLayoutDepth int, stopAtAnyHeading bool) (anchor, container string) {
 	container = "document root"
 	if targetLayoutDepth > 0 {
 		container = "ac:layout-cell"
@@ -139,6 +192,9 @@ func sectionStopAnchor(body string, stopOff int, targetLayoutDepth int) (anchor,
 	// exactly at "</ac:layout-cell>" (or, with no layout, never stops short).
 	if stopOff < len(body) && (targetLayoutDepth == 0 || !strings.HasPrefix(body[stopOff:], "</ac:layout-cell>")) {
 		anchor = "before next heading at same or higher level"
+		if stopAtAnyHeading {
+			anchor = "before next heading of any level"
+		}
 	}
 	return anchor, container
 }
@@ -159,14 +215,16 @@ func spliceEndOfSection(body, fragment, heading string) (SpliceResult, error) {
 		return SpliceResult{}, err
 	}
 
-	stopOff, _, err := findSectionEnd(body, match)
+	// end-of-section always covers the whole section: the insert belongs after
+	// the section's last subsection, not before its first.
+	ext, err := findSectionExtent(body, match, true)
 	if err != nil {
 		return SpliceResult{}, err
 	}
 
-	merged := body[:stopOff] + fragment + body[stopOff:]
+	merged := body[:ext.stop] + fragment + body[ext.stop:]
 
-	insertAnchor, container := sectionStopAnchor(body, stopOff, match.layoutCellDepth)
+	insertAnchor, container := sectionStopAnchor(body, ext.stop, match.layoutCellDepth, false)
 
 	return SpliceResult{
 		Merged: merged,

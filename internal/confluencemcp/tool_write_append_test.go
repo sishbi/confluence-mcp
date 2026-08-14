@@ -262,6 +262,85 @@ func TestAppend_EndOfSection(t *testing.T) {
 	assert.True(t, idxSectionB < idxOther, "Section B heading should precede its own paragraph")
 }
 
+// TestAppend_ReplaceSection_Subsections covers the defect where replacing an
+// h2 silently deleted its h3 subsections: the default must keep them, the
+// opt-in must remove them, and both the success message and the dry-run
+// preview must name them rather than leaving the byte delta as the only clue.
+func TestAppend_ReplaceSection_Subsections(t *testing.T) {
+	const body = `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>` +
+		`<h2>Ticket map</h2><p>intro</p><h3>Delivery sequence</h3><p>seq</p><h2>Next</h2>` +
+		`</ac:layout-cell></ac:layout-section></ac:layout>`
+
+	tests := []struct {
+		name               string
+		includeSubsections bool
+		wantSubsection     bool
+		wantMsg            string
+		wantSummary        string
+	}{
+		{
+			name:               "default preserves the subsection",
+			includeSubsections: false,
+			wantSubsection:     true,
+			wantMsg:            `Preserved 1 nested section: "Delivery sequence".`,
+			wantSummary:        `(replaces \u003cp\u003e x 1; preserves 1 nested section: \"Delivery sequence\")`,
+		},
+		{
+			name:               "include_subsections removes the subsection",
+			includeSubsections: true,
+			wantSubsection:     false,
+			wantMsg:            `Replaced 1 nested section: "Delivery sequence".`,
+			wantSummary:        `(replaces \u003cp\u003e x 2, \u003ch3\u003e x 1; replaces 1 nested section: \"Delivery sequence\")`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := WriteItem{
+				PageID: "p1", Body: "New intro.", Position: "replace_section",
+				Heading: "Ticket map", IncludeSubsections: tt.includeSubsections,
+			}
+
+			var captured map[string]any
+			h := &handlers{client: newAppendPageMock(body, &captured)}
+			msg, err := h.writeAppend(context.Background(), item, false)
+			require.NoError(t, err)
+			assert.Contains(t, msg, tt.wantMsg)
+
+			value := captured["body"].(map[string]any)["storage"].(map[string]any)["value"].(string)
+			assert.Contains(t, value, "New intro.")
+			assert.Contains(t, value, "<h2>Ticket map</h2>", "the target heading is always kept")
+			assert.Contains(t, value, "<h2>Next</h2>", "the next section is never touched")
+			if tt.wantSubsection {
+				assert.Contains(t, value, "<h3>Delivery sequence</h3>")
+				assert.Contains(t, value, "<p>seq</p>", "the subsection's own content survives too")
+			} else {
+				assert.NotContains(t, value, "Delivery sequence")
+				assert.NotContains(t, value, "<p>seq</p>")
+			}
+
+			dryH := &handlers{client: newAppendPageMock(body, nil)}
+			preview, err := dryH.writeAppend(context.Background(), item, true)
+			require.NoError(t, err)
+			assert.Contains(t, preview, tt.wantSummary)
+		})
+	}
+}
+
+func TestAppend_IncludeSubsections_RejectedForOtherPositions(t *testing.T) {
+	h := &handlers{client: newAppendPageMock(appendTestLayoutBody, nil)}
+
+	for _, position := range []string{"end", "after_heading", "end_of_section"} {
+		t.Run(position, func(t *testing.T) {
+			_, err := h.writeAppend(context.Background(), WriteItem{
+				PageID: "p1", Body: "x", Position: position,
+				Heading: "Section A", IncludeSubsections: true,
+			}, false)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "include_subsections")
+		})
+	}
+}
+
 func TestAppend_VersionMismatch(t *testing.T) {
 	h := &handlers{client: newAppendPageMock(appendTestLayoutBody, nil)}
 

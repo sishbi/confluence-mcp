@@ -1065,6 +1065,88 @@ func TestSmoke_Append_ReplaceSection(t *testing.T) {
 		"target heading should appear exactly once — fragment-leading duplicate should be stripped")
 }
 
+// TestSmoke_Append_ReplaceSection_Subsections pins the subsection rule against
+// real storage: replacing an h2 keeps its h3 subsections by default, and drops
+// them only when include_subsections is set. The defect this covers was found
+// on a live page, where the silent deletion of a subsection showed up only as
+// an unexpected byte delta — so the response text is asserted too, not just the
+// merged body.
+func TestSmoke_Append_ReplaceSection_Subsections(t *testing.T) {
+	const (
+		heading          = "28. Additional Headings, Lists, and Quotes"
+		oldContentMarker = "Instruction: Add substantial additional content"
+		subsection       = "28.1 Nested bullet and numbered lists"
+		subsectionBody   = "Top-level bullet A"
+		nextHeading      = "29. Additional Code Blocks"
+	)
+
+	tests := []struct {
+		name               string
+		includeSubsections bool
+		wantSubsection     bool
+		wantVerb           string
+	}{
+		{name: "default keeps the subsection", wantSubsection: true, wantVerb: "Preserved "},
+		{name: "include_subsections removes it", includeSubsections: true, wantVerb: "Replaced "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pageID := smokePageID()
+			if pageID == "" {
+				t.Skip("SMOKE_PAGE_ID not set")
+			}
+			env := newLiveEnv(t)
+			original := snapshotAndRestorePage(t, env, pageID)
+			for _, marker := range []string{oldContentMarker, subsection, subsectionBody, nextHeading} {
+				require.Contains(t, original.Body.Storage.Value, marker,
+					"fixture page unexpectedly missing reference content — test cannot verify the subsection rule")
+			}
+
+			sentinel := fmt.Sprintf("Smoke replace_section subsections sentinel %d", time.Now().UnixNano())
+			item := map[string]any{
+				"page_id":  pageID,
+				"body":     sentinel,
+				"position": "replace_section",
+				"heading":  heading,
+			}
+			// Only set when true: the default path must be exercised with the
+			// field absent, exactly as an unaware agent would send it.
+			if tt.includeSubsections {
+				item["include_subsections"] = true
+			}
+
+			text := callTool(t, env.session, "confluence_write", map[string]any{
+				"action": "append",
+				"items":  []any{item},
+			})
+			assert.Contains(t, text, "Appended to")
+			assert.Contains(t, text, tt.wantVerb+"1 nested section",
+				"the response must say what happened to the subsection")
+			assert.Contains(t, text, subsection, "the response must name the subsection")
+
+			updated, err := env.client.GetPage(context.Background(), pageID)
+			require.NoError(t, err)
+
+			storage := updated.Body.Storage.Value
+			assert.Contains(t, storage, sentinel, "sentinel should be present")
+			assert.Contains(t, storage, heading, "target heading should still be present")
+			assert.NotContains(t, storage, oldContentMarker,
+				"the section's own content should have been replaced")
+			assert.Contains(t, storage, nextHeading,
+				"next h2 should survive — the replace must stop inside section 28")
+			if tt.wantSubsection {
+				assert.Contains(t, storage, subsection,
+					"subsection heading must survive a default replace")
+				assert.Contains(t, storage, subsectionBody,
+					"the subsection's own content must survive too")
+			} else {
+				assert.NotContains(t, storage, subsection)
+				assert.NotContains(t, storage, subsectionBody)
+			}
+		})
+	}
+}
+
 // TestSmoke_Append_StorageMacro exercises appending a macro via format=storage.
 // Markdown does not synthesise new macros on write (GFM alerts are a read-only
 // projection of existing macros), so adding a macro requires raw storage XHTML.

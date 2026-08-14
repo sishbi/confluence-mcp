@@ -3,6 +3,7 @@ package confluencemcp
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -364,7 +365,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("stops at next same-level heading in same cell", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><p>old1</p><p>old2</p><h2>B</h2><p>keep</p>`)
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A")
+		res, err := spliceReplaceSection(body, fragment, "A", false)
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -383,7 +384,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("stops at next higher-level heading", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h3>A</h3><p>old</p><h2>Top</h2>`)
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A")
+		res, err := spliceReplaceSection(body, fragment, "A", false)
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -393,23 +394,80 @@ func TestSplice_ReplaceSection(t *testing.T) {
 		}
 	})
 
-	t.Run("deeper headings between target and stop are included in replace", func(t *testing.T) {
-		body := fmt.Sprintf(cell, `<h2>A</h2><p>p1</p><h3>sub</h3><p>p2</p><h2>B</h2>`)
+	// Regression for the real page edit that lost "7.1 Delivery sequence" when
+	// its parent h2 was replaced: by default a replace stops at the first
+	// subsection, and the subsections are named back to the caller either way.
+	t.Run("subsections", func(t *testing.T) {
+		body := fmt.Sprintf(cell, `<h2>A</h2><p>p1</p><h3>sub one</h3><p>p2</p><h3>sub two</h3><p>p3</p><h2>B</h2>`)
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A")
-		if err != nil {
-			t.Fatalf("unexpected err: %v", err)
-		}
-		want := fmt.Sprintf(cell, `<h2>A</h2><p>new</p><h2>B</h2>`)
-		if res.Merged != want {
-			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
-		}
+
+		t.Run("default keeps every subsection", func(t *testing.T) {
+			res, err := spliceReplaceSection(body, fragment, "A", false)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			want := fmt.Sprintf(cell, `<h2>A</h2><p>new</p><h3>sub one</h3><p>p2</p><h3>sub two</h3><p>p3</p><h2>B</h2>`)
+			if res.Merged != want {
+				t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+			}
+			if got := res.Boundary.PreservedSections; !reflect.DeepEqual(got, []string{"sub one", "sub two"}) {
+				t.Errorf("PreservedSections = %v", got)
+			}
+			if got := res.Boundary.ReplacedSections; got != nil {
+				t.Errorf("ReplacedSections should be nil for a narrow replace, got %v", got)
+			}
+			if got := res.Boundary.EndAnchor; got != "before next heading of any level" {
+				t.Errorf("EndAnchor = %q", got)
+			}
+			// Only the section's own <p> is replaced — the subsections' content
+			// must not be counted.
+			if got := res.Boundary.ReplacedElementSummary; !reflect.DeepEqual(got, []string{"<p> x 1"}) {
+				t.Errorf("ReplacedElementSummary = %v", got)
+			}
+		})
+
+		t.Run("includeSubsections removes them", func(t *testing.T) {
+			res, err := spliceReplaceSection(body, fragment, "A", true)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			want := fmt.Sprintf(cell, `<h2>A</h2><p>new</p><h2>B</h2>`)
+			if res.Merged != want {
+				t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+			}
+			if got := res.Boundary.ReplacedSections; !reflect.DeepEqual(got, []string{"sub one", "sub two"}) {
+				t.Errorf("ReplacedSections = %v", got)
+			}
+			if got := res.Boundary.PreservedSections; got != nil {
+				t.Errorf("PreservedSections should be nil for a wide replace, got %v", got)
+			}
+			if got := res.Boundary.EndAnchor; got != "before next heading at same or higher level" {
+				t.Errorf("EndAnchor = %q", got)
+			}
+		})
+
+		t.Run("no subsections: both extents behave identically", func(t *testing.T) {
+			plain := fmt.Sprintf(cell, `<h2>A</h2><p>p1</p><h2>B</h2>`)
+			want := fmt.Sprintf(cell, `<h2>A</h2><p>new</p><h2>B</h2>`)
+			for _, includeSubsections := range []bool{false, true} {
+				res, err := spliceReplaceSection(plain, fragment, "A", includeSubsections)
+				if err != nil {
+					t.Fatalf("unexpected err: %v", err)
+				}
+				if res.Merged != want {
+					t.Errorf("includeSubsections=%v merged mismatch\n got: %s\nwant: %s", includeSubsections, res.Merged, want)
+				}
+				if res.Boundary.ReplacedSections != nil || res.Boundary.PreservedSections != nil {
+					t.Errorf("includeSubsections=%v should report no nested sections", includeSubsections)
+				}
+			}
+		})
 	})
 
 	t.Run("stops at end of layout-cell when no later heading", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><p>old</p>`)
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A")
+		res, err := spliceReplaceSection(body, fragment, "A", false)
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -422,7 +480,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("next same-level heading in sibling column is ignored", func(t *testing.T) {
 		body := `<ac:layout><ac:layout-section ac:type="three_equal"><ac:layout-cell><h2>A</h2><p>old</p></ac:layout-cell><ac:layout-cell><h2>B</h2><p>other</p></ac:layout-cell></ac:layout-section></ac:layout>`
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A")
+		res, err := spliceReplaceSection(body, fragment, "A", false)
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -435,7 +493,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("next same-level heading in later section is ignored", func(t *testing.T) {
 		body := `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell><h2>A</h2><p>old</p></ac:layout-cell></ac:layout-section><ac:layout-section ac:type="fixed-width"><ac:layout-cell><h2>B</h2></ac:layout-cell></ac:layout-section></ac:layout>`
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A")
+		res, err := spliceReplaceSection(body, fragment, "A", false)
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -448,7 +506,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("no-layout page: extends to end of body when no later heading", func(t *testing.T) {
 		body := `<h2>A</h2><p>old</p>`
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A")
+		res, err := spliceReplaceSection(body, fragment, "A", false)
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -460,7 +518,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 
 	t.Run("heading in macro returns ErrHeadingInUnsafeContainer", func(t *testing.T) {
 		body := `<ac:structured-macro ac:name="expand"><ac:rich-text-body><h3>T</h3></ac:rich-text-body></ac:structured-macro>`
-		_, err := spliceReplaceSection(body, `<p>new</p>`, "T")
+		_, err := spliceReplaceSection(body, `<p>new</p>`, "T", false)
 		if !errors.Is(err, ErrHeadingInUnsafeContainer) {
 			t.Fatalf("got %v, want ErrHeadingInUnsafeContainer", err)
 		}
@@ -468,7 +526,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 
 	t.Run("heading in td returns ErrHeadingInUnsafeContainer", func(t *testing.T) {
 		body := `<table><tbody><tr><td><h4>T</h4></td></tr></tbody></table>`
-		_, err := spliceReplaceSection(body, `<p>new</p>`, "T")
+		_, err := spliceReplaceSection(body, `<p>new</p>`, "T", false)
 		if !errors.Is(err, ErrHeadingInUnsafeContainer) {
 			t.Fatalf("got %v, want ErrHeadingInUnsafeContainer", err)
 		}
@@ -501,7 +559,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				res, err := spliceReplaceSection(tc.body, `<p>NEW</p>`, "A")
+				res, err := spliceReplaceSection(tc.body, `<p>NEW</p>`, "A", false)
 				if err != nil {
 					t.Fatalf("unexpected err: %v", err)
 				}
@@ -514,7 +572,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 
 	t.Run("ReplacedElementSummary does not double-count when a nested container shares the top-level element's tag name", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><ul><li><ul><li><p>x</p></li></ul><p>y</p></li></ul><h2>B</h2>`)
-		res, err := spliceReplaceSection(body, `<p>new</p>`, "A")
+		res, err := spliceReplaceSection(body, `<p>new</p>`, "A", false)
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -546,7 +604,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				res, err := spliceReplaceSection(tc.body, `<p>new</p>`, "A")
+				res, err := spliceReplaceSection(tc.body, `<p>new</p>`, "A", false)
 				if err != nil {
 					t.Fatalf("unexpected err: %v", err)
 				}
@@ -568,7 +626,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 
 	t.Run("ReplacedElementSummary counts top-level replaced elements", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><p>p1</p><p>p2</p><ul><li><p>li</p></li></ul><h2>B</h2>`)
-		res, err := spliceReplaceSection(body, `<p>new</p>`, "A")
+		res, err := spliceReplaceSection(body, `<p>new</p>`, "A", false)
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -589,7 +647,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("fragment that redundantly starts with the target heading is de-duplicated", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>Data scrubbing</h2><p>old</p><h2>B</h2>`)
 		fragment := `<h2>Data scrubbing</h2><p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "Data scrubbing")
+		res, err := spliceReplaceSection(body, fragment, "Data scrubbing", false)
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -602,7 +660,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("leading heading with different level but same text is stripped", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><p>old</p><h2>B</h2>`)
 		fragment := `<h3>A</h3><p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A")
+		res, err := spliceReplaceSection(body, fragment, "A", false)
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -615,7 +673,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("leading heading with different text is preserved", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><p>old</p><h2>B</h2>`)
 		fragment := `<h3>Details</h3><p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A")
+		res, err := spliceReplaceSection(body, fragment, "A", false)
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}

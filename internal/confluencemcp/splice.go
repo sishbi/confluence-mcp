@@ -14,8 +14,10 @@ const (
 	// heading and ABOVE the section's existing content.
 	ModeAfterHeading
 	// ModeReplaceSection replaces the content under a named heading (exclusive of
-	// the heading itself) up to the next same-or-higher-level heading or the end
-	// of the containing layout-cell.
+	// the heading itself) up to the next heading of any level, or the end of the
+	// containing layout-cell. SpliceOptions.IncludeSubsections widens the range
+	// to the next same-or-higher-level heading, replacing the section's
+	// subsections too.
 	ModeReplaceSection
 	// ModeEndOfSection inserts the fragment at the END of a named section:
 	// after the section's existing content, before the next
@@ -27,6 +29,9 @@ const (
 type SpliceOptions struct {
 	Mode    Mode
 	Heading string
+	// IncludeSubsections applies to ModeReplaceSection only: replace the
+	// section's nested subsections as well as its own content.
+	IncludeSubsections bool
 }
 
 // BoundaryInfo describes where a splice landed and, for replace-section, what
@@ -49,6 +54,11 @@ type BoundaryInfo struct {
 	// ReplacedElementSummary is a tag-count histogram of top-level replaced
 	// elements, e.g. ["<p> x 2", "<ul> x 1"].
 	ReplacedElementSummary []string `json:"replaced_element_summary,omitempty"`
+	// ReplacedSections and PreservedSections name the target section's nested
+	// subsection headings (replace only). Exactly one is populated, per the
+	// requested extent, so the caller can see which way the boundary fell.
+	ReplacedSections  []string `json:"replaced_sections,omitempty"`
+	PreservedSections []string `json:"preserved_sections,omitempty"`
 }
 
 // SpliceResult is the output of a successful Splice call.
@@ -75,7 +85,7 @@ func Splice(body, fragment string, opts SpliceOptions) (SpliceResult, error) {
 	case ModeAfterHeading:
 		return spliceAfterHeading(body, fragment, opts.Heading)
 	case ModeReplaceSection:
-		return spliceReplaceSection(body, fragment, opts.Heading)
+		return spliceReplaceSection(body, fragment, opts.Heading, opts.IncludeSubsections)
 	case ModeEndOfSection:
 		return spliceEndOfSection(body, fragment, opts.Heading)
 	default:

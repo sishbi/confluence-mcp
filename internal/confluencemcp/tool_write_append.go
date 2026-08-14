@@ -29,6 +29,12 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 	if mode != ModeEnd && item.Heading == "" {
 		return "", fmt.Errorf("heading is required for position %q", item.Position)
 	}
+	// include_subsections only widens a replace. Silently ignoring it on the
+	// other positions would let a caller believe a destructive option was
+	// honoured when it was dropped.
+	if item.IncludeSubsections && mode != ModeReplaceSection {
+		return "", fmt.Errorf(`include_subsections is only valid for position "replace_section"`)
+	}
 
 	// Convert fragment to storage if the agent sent markdown. The fragment is
 	// the same across retries — only the base body changes on a stale version.
@@ -54,7 +60,7 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 		preview := buildPreview(
 			item.PageID,
 			page.Body.Storage.Value, res.Merged, fragmentStorage,
-			mode, item.Heading, res.Boundary,
+			mode, item.Heading, item.IncludeSubsections, res.Boundary,
 			item.Body, inputFormat,
 		)
 		data, jerr := json.MarshalIndent(preview, "", "  ")
@@ -73,7 +79,7 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 	updated, err := h.client.UpdatePage(ctx, item.PageID, appendPayload(item.PageID, page, res.Merged))
 	if err == nil {
 		h.cache.evict(item.PageID)
-		return appendSuccessMsg(updated.Title, updated.ID, page.Body.Storage.Value, res.Merged, fragmentStorage), nil
+		return appendSuccessMsg(updated.Title, updated.ID, page.Body.Storage.Value, res.Merged, fragmentStorage, res.Boundary), nil
 	}
 
 	// Retry once on 409 when the caller did not pin a version. Confluence's
@@ -91,21 +97,30 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 			return "", uerr
 		}
 		h.cache.evict(item.PageID)
-		return appendSuccessMsg(updated2.Title, updated2.ID, page2.Body.Storage.Value, res2.Merged, fragmentStorage), nil
+		return appendSuccessMsg(updated2.Title, updated2.ID, page2.Body.Storage.Value, res2.Merged, fragmentStorage, res2.Boundary), nil
 	}
 	return "", err
 }
 
 // appendSuccessMsg formats the append success line, including the fragment
 // size and base→merged body sizes so the caller can see what was sent versus
-// what the server assembled.
-func appendSuccessMsg(title, id, baseBody, mergedBody, fragment string) string {
+// what the server assembled. A replace also names the nested subsections it
+// removed or kept: the byte delta alone once let a subsection deletion go
+// unnoticed.
+func appendSuccessMsg(title, id, baseBody, mergedBody, fragment string, b BoundaryInfo) string {
 	base := len(baseBody)
 	merged := len(mergedBody)
-	return fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"Appended to page %q (ID: %s). Fragment sent: %d bytes; page body: %d → %d (Δ%+d).",
 		title, id, len(fragment), base, merged, merged-base,
 	)
+	if len(b.ReplacedSections) > 0 {
+		msg += fmt.Sprintf(" Replaced %s.", nestedSectionPhrase(b.ReplacedSections))
+	}
+	if len(b.PreservedSections) > 0 {
+		msg += fmt.Sprintf(" Preserved %s.", nestedSectionPhrase(b.PreservedSections))
+	}
+	return msg
 }
 
 // fetchAndSplice fetches the page's current storage body and applies the
@@ -117,8 +132,9 @@ func (h *handlers) fetchAndSplice(ctx context.Context, item WriteItem, mode Mode
 		return nil, SpliceResult{}, fmt.Errorf("fetch page: %w", err)
 	}
 	res, err := Splice(page.Body.Storage.Value, fragmentStorage, SpliceOptions{
-		Mode:    mode,
-		Heading: item.Heading,
+		Mode:               mode,
+		Heading:            item.Heading,
+		IncludeSubsections: item.IncludeSubsections,
 	})
 	if err != nil {
 		return nil, SpliceResult{}, err

@@ -45,12 +45,13 @@ func buildPreview(
 	base, merged, fragmentStorage string,
 	mode Mode,
 	heading string,
+	includeSubsections bool,
 	boundary BoundaryInfo,
 	inputBody, inputFormat string,
 ) AppendPreview {
 	pos := modeString(mode)
 	summary := summariseAction(mode, heading, boundary)
-	before, after := contextAround(base, mode, heading)
+	before, after := contextAround(base, mode, heading, includeSubsections)
 
 	return AppendPreview{
 		PageID:        pageID,
@@ -99,8 +100,21 @@ func summariseAction(mode Mode, heading string, b BoundaryInfo) string {
 		return fmt.Sprintf("Insert after heading %q.", heading)
 	case ModeReplaceSection:
 		summary := fmt.Sprintf("Replace content under heading %q", heading)
+		var parts []string
 		if len(b.ReplacedElementSummary) > 0 {
-			summary += " (replaces " + strings.Join(b.ReplacedElementSummary, ", ") + ")"
+			parts = append(parts, "replaces "+strings.Join(b.ReplacedElementSummary, ", "))
+		}
+		// Nested subsections are named, never folded into the tag histogram —
+		// losing (or keeping) a whole subsection is the one outcome the caller
+		// must not have to infer from a byte delta.
+		if len(b.ReplacedSections) > 0 {
+			parts = append(parts, "replaces "+nestedSectionPhrase(b.ReplacedSections))
+		}
+		if len(b.PreservedSections) > 0 {
+			parts = append(parts, "preserves "+nestedSectionPhrase(b.PreservedSections))
+		}
+		if len(parts) > 0 {
+			summary += " (" + strings.Join(parts, "; ") + ")"
 		}
 		return summary + "."
 	case ModeEndOfSection:
@@ -110,13 +124,29 @@ func summariseAction(mode Mode, heading string, b BoundaryInfo) string {
 	}
 }
 
+// nestedSectionPhrase renders a list of nested subsection headings as
+// `2 nested sections: "A", "B"`.
+func nestedSectionPhrase(names []string) string {
+	noun := "nested sections"
+	if len(names) == 1 {
+		noun = "nested section"
+	}
+	quoted := make([]string, 0, len(names))
+	for _, n := range names {
+		quoted = append(quoted, fmt.Sprintf("%q", n))
+	}
+	return fmt.Sprintf("%d %s: %s", len(names), noun, strings.Join(quoted, ", "))
+}
+
 // contextAround returns a snippet of base-body context before and after the
 // splice point. Kept small (≤ maxContextChars each side) to bound the preview
-// size. ModeReplaceSection and ModeEndOfSection both stop at the section's end
-// via findSectionEnd, but keep separate cases: their "before" differs —
-// replace excludes the section body (it is being replaced), end-of-section
-// includes it (it is being kept).
-func contextAround(base string, mode Mode, heading string) (string, string) {
+// size. ModeReplaceSection and ModeEndOfSection both stop at a section
+// boundary via findSectionExtent, but keep separate cases: their "before"
+// differs — replace excludes the section body (it is being replaced),
+// end-of-section includes it (it is being kept). includeSubsections applies to
+// replace only, and must match the splice's own extent so the "after" snippet
+// starts where the replacement really ends.
+func contextAround(base string, mode Mode, heading string, includeSubsections bool) (string, string) {
 	const maxContextChars = 400
 
 	truncBefore := func(s string) string {
@@ -152,11 +182,11 @@ func contextAround(base string, mode Mode, heading string) (string, string) {
 		if err != nil {
 			return "", ""
 		}
-		stopOff, _, err := findSectionEnd(base, match)
+		ext, err := findSectionExtent(base, match, includeSubsections)
 		if err != nil {
 			return truncBefore(base[:match.headingEndOff]), ""
 		}
-		return truncBefore(base[:match.headingEndOff]), truncAfter(base[stopOff:])
+		return truncBefore(base[:match.headingEndOff]), truncAfter(base[ext.stop:])
 	case ModeEndOfSection:
 		// "Before" runs all the way to the section's stop point, including
 		// the section's existing body — that's what distinguishes this from
@@ -168,11 +198,11 @@ func contextAround(base string, mode Mode, heading string) (string, string) {
 		if err != nil {
 			return "", ""
 		}
-		stopOff, _, err := findSectionEnd(base, match)
+		ext, err := findSectionExtent(base, match, true)
 		if err != nil {
 			return "", ""
 		}
-		return truncBefore(base[:stopOff]), truncAfter(base[stopOff:])
+		return truncBefore(base[:ext.stop]), truncAfter(base[ext.stop:])
 	default:
 		return "", ""
 	}
