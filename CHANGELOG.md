@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.11](https://github.com/sishbi/confluence-mcp/compare/v0.0.10...v0.0.11) (2026-08-14)
+
+
+### Bug Fixes
+
+* honour section and next_page_token when page_ids is set ([#30](https://github.com/sishbi/confluence-mcp/issues/30)) ([bea064c](https://github.com/sishbi/confluence-mcp/commit/bea064c6f74255b83899de8fb999a15bc22a9c22))
+
 ## [0.0.10](https://github.com/sishbi/confluence-mcp/compare/v0.0.9...v0.0.10) (2026-08-12)
 
 
