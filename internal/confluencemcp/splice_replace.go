@@ -8,7 +8,13 @@ import (
 // spliceReplaceSection replaces the content under the target heading up to
 // the stop point defined by the section rules. See
 // internal/confluencemcp/.../design doc for the full rule.
-func spliceReplaceSection(body, fragment, heading string) (SpliceResult, error) {
+//
+// includeSubsections widens the replaced range to the whole section,
+// subsections included. It defaults to false because the narrow range is the
+// least destructive: a caller sending a small fragment for one section must
+// not lose that section's subsections just because the fragment did not
+// repeat them.
+func spliceReplaceSection(body, fragment, heading string, includeSubsections bool) (SpliceResult, error) {
 	match, err := locateHeading(body, heading)
 	if err != nil {
 		return SpliceResult{}, err
@@ -22,31 +28,38 @@ func spliceReplaceSection(body, fragment, heading string) (SpliceResult, error) 
 	fragment = stripLeadingHeading(fragment, heading)
 
 	// The replaced region starts at match.headingEndOff (just after </hN>) and
-	// extends up to the stop offset. findSectionEnd also collects top-level
+	// extends up to the stop offset. findSectionExtent also collects top-level
 	// element names seen between the heading end and the stop, for the
-	// replaced-element summary.
-	stopOff, replacedTags, err := findSectionEnd(body, match)
+	// replaced-element summary, plus the section's nested subsection headings.
+	ext, err := findSectionExtent(body, match, includeSubsections)
 	if err != nil {
 		return SpliceResult{}, err
 	}
 
-	replacedByteCount := stopOff - match.headingEndOff
-	merged := body[:match.headingEndOff] + fragment + body[stopOff:]
+	replacedByteCount := ext.stop - match.headingEndOff
+	merged := body[:match.headingEndOff] + fragment + body[ext.stop:]
 
 	startAnchor := fmt.Sprintf("after </h%d> %q", match.level, heading)
-	endAnchor, container := sectionStopAnchor(body, stopOff, match.layoutCellDepth)
+	endAnchor, container := sectionStopAnchor(body, ext.stop, match.layoutCellDepth, !includeSubsections)
 
-	return SpliceResult{
-		Merged: merged,
-		Boundary: BoundaryInfo{
-			StartAnchor:            startAnchor,
-			EndAnchor:              endAnchor,
-			Container:              container,
-			CrossesLayout:          false,
-			ReplacedByteCount:      replacedByteCount,
-			ReplacedElementSummary: summariseTags(replacedTags),
-		},
-	}, nil
+	boundary := BoundaryInfo{
+		StartAnchor:            startAnchor,
+		EndAnchor:              endAnchor,
+		Container:              container,
+		CrossesLayout:          false,
+		ReplacedByteCount:      replacedByteCount,
+		ReplacedElementSummary: summariseTags(ext.replacedTags),
+	}
+	// The same headings are either destroyed or kept, depending on the extent —
+	// report them under the field that says which, so neither outcome is
+	// silent.
+	if includeSubsections {
+		boundary.ReplacedSections = ext.nestedHeadings
+	} else {
+		boundary.PreservedSections = ext.nestedHeadings
+	}
+
+	return SpliceResult{Merged: merged, Boundary: boundary}, nil
 }
 
 // reLeadingHeading matches an optional leading whitespace run followed by a

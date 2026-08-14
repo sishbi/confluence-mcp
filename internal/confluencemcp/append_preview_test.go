@@ -13,7 +13,7 @@ func TestBuildPreview(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splice: %v", err)
 		}
-		p := buildPreview("42", base, res.Merged, fragment, ModeEnd, "", res.Boundary, "new", "markdown")
+		p := buildPreview("42", base, res.Merged, fragment, ModeEnd, "", false, res.Boundary, "new", "markdown")
 		if p.PageID != "42" {
 			t.Errorf("PageID = %q", p.PageID)
 		}
@@ -50,7 +50,7 @@ func TestBuildPreview(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splice: %v", err)
 		}
-		p := buildPreview("42", base, res.Merged, fragment, ModeAfterHeading, "A", res.Boundary, "new", "markdown")
+		p := buildPreview("42", base, res.Merged, fragment, ModeAfterHeading, "A", false, res.Boundary, "new", "markdown")
 		if p.Position != "after_heading" {
 			t.Errorf("Position = %q", p.Position)
 		}
@@ -70,7 +70,7 @@ func TestBuildPreview(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splice: %v", err)
 		}
-		p := buildPreview("42", base, res.Merged, fragment, ModeReplaceSection, "A", res.Boundary, "new", "markdown")
+		p := buildPreview("42", base, res.Merged, fragment, ModeReplaceSection, "A", false, res.Boundary, "new", "markdown")
 		if p.Position != "replace_section" {
 			t.Errorf("Position = %q", p.Position)
 		}
@@ -95,7 +95,7 @@ func TestBuildPreview(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splice: %v", err)
 		}
-		p := buildPreview("42", base, res.Merged, fragment, ModeEndOfSection, "A", res.Boundary, "new", "markdown")
+		p := buildPreview("42", base, res.Merged, fragment, ModeEndOfSection, "A", false, res.Boundary, "new", "markdown")
 		if p.Position != "end_of_section" {
 			t.Errorf("Position = %q, want end_of_section", p.Position)
 		}
@@ -134,7 +134,7 @@ func TestBuildPreview(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splice: %v", err)
 		}
-		p := buildPreview("42", base, res.Merged, fragment, ModeReplaceSection, "A", res.Boundary, "x", "markdown")
+		p := buildPreview("42", base, res.Merged, fragment, ModeReplaceSection, "A", false, res.Boundary, "x", "markdown")
 		if p.Sizes.DeltaBytes >= 0 {
 			t.Errorf("DeltaBytes should be negative, got %d", p.Sizes.DeltaBytes)
 		}
@@ -150,7 +150,7 @@ func replaceStr(pattern, v string) string {
 // because that body is what is being replaced.
 func TestContextAround_ReplaceSection(t *testing.T) {
 	base := `<h2>A</h2><p>old</p><h2>B</h2><p>other</p>`
-	before, after := contextAround(base, ModeReplaceSection, "A")
+	before, after := contextAround(base, ModeReplaceSection, "A", false)
 	if !strings.HasSuffix(before, "<h2>A</h2>") {
 		t.Errorf("before should end at the target heading's closing tag: %q", before)
 	}
