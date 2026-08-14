@@ -20,7 +20,7 @@ var readTool = &mcp.Tool{
 3. cql — Search via CQL query.
 4. resource — List a resource: "spaces", "children" (needs page_id), "comments" (needs page_id), "inline_comments" (needs page_id), "labels" (needs page_id).
 
-Options: format ("markdown" default, or "storage" for raw XHTML), section (extract a heading section from a fetched page), limit (default 100), next_page_token, resolution_status (resource: "inline_comments" only — filter by "open", "resolved", "dangling", or "reopened").
+Options: format ("markdown" default, or "storage" for raw XHTML), section (extract a heading section, fetching the page itself on a cold cache — accepts page_id or a single-element page_ids; needs exactly one page id), limit (default 100), next_page_token (accepts page_id or page_ids alongside it, but they must name the same page the token already carries — a mismatch or more than one id is rejected; a url naming the same page also continues the read, but a focusedCommentId permalink does not), resolution_status (resource: "inline_comments" only — filter by "open", "resolved", "dangling", or "reopened").
 Long pages are automatically chunked — if truncated, a table of contents is shown with section names you can request individually.
 Use format=storage when you need to add or modify Confluence macros directly.`,
 }

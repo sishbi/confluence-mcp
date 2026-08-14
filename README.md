@@ -13,7 +13,7 @@ Give your AI agent full Confluence access with just 2 tools.
 
 - **2 tools, not 72** — the server knows the API so the LLM doesn't have to
 - **Credentials stay local** — Basic auth via env vars, no OAuth dance
-- **Smart by default** — long pages are automatically chunked with a table of contents; follow-up section requests are served from cache
+- **Smart by default** — long pages are automatically chunked with a table of contents; section requests fetch the page on a cold cache and are served from cache thereafter
 
 ## Features
 
@@ -21,8 +21,8 @@ Give your AI agent full Confluence access with just 2 tools.
 - **URL parsing** — paste any Confluence page URL, including `?focusedCommentId=` deep-links
 - **CQL search** — arbitrary CQL queries via the v1 search endpoint
 - **Resource listings** — spaces, children, comments, inline comments, labels
-- **Adaptive chunking** — long pages return a TOC + first chunk; request sections individually by heading
-- **`next_page_token` cursor** — base64url JSON cursor for section-index or byte-offset paging; re-fetches silently if the cache has evicted
+- **Adaptive chunking** — long pages return a TOC + first chunk; request sections individually by heading. `section` accepts either `page_id` or a single-element `page_ids`, needs exactly one page id resolved, and fetches the page itself on a cold cache
+- **`next_page_token` cursor** — base64url JSON cursor for section-index or byte-offset paging; accepts `page_id` or `page_ids` alongside it, but the id(s) must agree with the page the token already carries — a mismatch or more than one id is rejected. A `url` naming the same page continues the read too (a `focusedCommentId` permalink does not); `cql` and `resource` listings use the field as their own pagination cursor. Re-fetches silently if the cache has evicted
 - **60-second page cache** — eliminates redundant API calls for section follow-ups; evicted on write
 - **Raw storage access** — `format="storage"` returns Confluence XHTML when you need to inspect or hand-edit macros
 
