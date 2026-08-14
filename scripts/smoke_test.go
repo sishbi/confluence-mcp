@@ -242,6 +242,34 @@ func TestSmoke_ReadKnownPageSections(t *testing.T) {
 	require.NotEmpty(t, sectionText)
 	assert.Contains(t, sectionText, sectionName,
 		"extracted section should include its heading text")
+
+	// The same section via page_ids (array) must return the same content.
+	// page_ids is the documented primary mode, and section used to be
+	// silently dropped on that path — the caller got chunk 1 plus the table
+	// of contents with no error, which is indistinguishable from a broken
+	// extractor. Only page_id (singular) was covered above, so this is the
+	// spelling that actually regresses.
+	result3, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "confluence_read",
+		Arguments: map[string]any{"page_ids": []any{pageID}, "section": sectionName},
+	})
+	require.NoError(t, err)
+	require.False(t, result3.IsError, "section extraction via page_ids should succeed for %q", sectionName)
+	pageIDsSectionText := result3.Content[0].(*mcp.TextContent).Text
+	assert.Equal(t, sectionText, pageIDsSectionText,
+		"page_ids and page_id must return the same section, not a full-page fall-through")
+	assert.NotContains(t, pageIDsSectionText, "**Table of Contents:**",
+		"a section request must not fall through to the chunked full page")
+
+	// A section that does not exist must be an explicit error, never a
+	// silent fall-through to the whole page.
+	result4, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "confluence_read",
+		Arguments: map[string]any{"page_ids": []any{pageID}, "section": "No Such Heading Anywhere"},
+	})
+	require.NoError(t, err)
+	require.True(t, result4.IsError, "an absent section must be a hard error, not a full-page fall-through")
+	assert.Contains(t, result4.Content[0].(*mcp.TextContent).Text, "not found")
 }
 
 // firstHeading returns the first ATX heading found in md (without the leading
