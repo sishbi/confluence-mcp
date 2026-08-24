@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.13](https://github.com/sishbi/confluence-mcp/compare/v0.0.12...v0.0.13) (2026-08-24)
+
+
+### Features
+
+* rename a section heading during append/replace_section ([#36](https://github.com/sishbi/confluence-mcp/issues/36)) ([1c53f09](https://github.com/sishbi/confluence-mcp/commit/1c53f095f94750de76801f542e5ca3d84ecb395a))
+
 ## [0.0.12](https://github.com/sishbi/confluence-mcp/compare/v0.0.11...v0.0.12) (2026-08-14)
 
 
