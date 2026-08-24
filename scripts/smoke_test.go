@@ -1147,6 +1147,88 @@ func TestSmoke_Append_ReplaceSection_Subsections(t *testing.T) {
 	}
 }
 
+// TestSmoke_Append_ReplaceSection_Rename exercises new_heading against real
+// storage: the heading really changes on the page, the section's content is
+// replaced in the same write, and the following section is untouched. The
+// rejection path is asserted live too — a rename onto a heading the page
+// already carries must fail before the PUT, leaving the page byte-identical.
+func TestSmoke_Append_ReplaceSection_Rename(t *testing.T) {
+	const (
+		heading     = "27. Final Verification Notes"
+		nextHeading = "28. Additional Headings, Lists, and Quotes"
+	)
+
+	t.Run("renames the heading and replaces the content", func(t *testing.T) {
+		pageID := smokePageID()
+		if pageID == "" {
+			t.Skip("SMOKE_PAGE_ID not set")
+		}
+		env := newLiveEnv(t)
+		original := snapshotAndRestorePage(t, env, pageID)
+		for _, marker := range []string{heading, nextHeading} {
+			require.Contains(t, original.Body.Storage.Value, marker,
+				"fixture page unexpectedly missing reference heading — test cannot verify the rename")
+		}
+
+		newHeading := fmt.Sprintf("27. Smoke rename sentinel %d", time.Now().UnixNano())
+		sentinel := "Smoke rename body sentinel"
+
+		text := callTool(t, env.session, "confluence_write", map[string]any{
+			"action": "append",
+			"items": []any{map[string]any{
+				"page_id":     pageID,
+				"body":        sentinel,
+				"position":    "replace_section",
+				"heading":     heading,
+				"new_heading": newHeading,
+			}},
+		})
+		assert.Contains(t, text, "Appended to")
+		assert.Contains(t, text, fmt.Sprintf("Renamed heading %q → %q.", heading, newHeading),
+			"the response must name the rename rather than leaving it to the byte delta")
+
+		updated, err := env.client.GetPage(context.Background(), pageID)
+		require.NoError(t, err)
+
+		storage := updated.Body.Storage.Value
+		assert.Contains(t, storage, newHeading, "the new heading must be on the page")
+		assert.NotContains(t, storage, heading, "the old heading must be gone")
+		assert.Equal(t, 1, strings.Count(storage, newHeading),
+			"the new heading should appear exactly once")
+		assert.Contains(t, storage, sentinel, "the replacement content must be present")
+		assert.Contains(t, storage, nextHeading,
+			"next h2 should survive — the rename must not widen the replaced range")
+	})
+
+	t.Run("refuses a rename onto a heading the page already carries", func(t *testing.T) {
+		pageID := smokePageID()
+		if pageID == "" {
+			t.Skip("SMOKE_PAGE_ID not set")
+		}
+		env := newLiveEnv(t)
+		original := snapshotAndRestorePage(t, env, pageID)
+
+		text := callTool(t, env.session, "confluence_write", map[string]any{
+			"action": "append",
+			"items": []any{map[string]any{
+				"page_id":     pageID,
+				"body":        "Smoke rename rejection sentinel",
+				"position":    "replace_section",
+				"heading":     heading,
+				"new_heading": nextHeading,
+			}},
+		})
+		assert.Contains(t, text, "rename_ambiguous")
+
+		updated, err := env.client.GetPage(context.Background(), pageID)
+		require.NoError(t, err)
+		assert.Equal(t, original.Body.Storage.Value, updated.Body.Storage.Value,
+			"a rejected rename must not touch the page")
+		assert.Equal(t, original.Version.Number, updated.Version.Number,
+			"a rejected rename must not bump the version")
+	})
+}
+
 // TestSmoke_Append_StorageMacro exercises appending a macro via format=storage.
 // Markdown does not synthesise new macros on write (GFM alerts are a read-only
 // projection of existing macros), so adding a macro requires raw storage XHTML.
