@@ -32,6 +32,16 @@ type SpliceOptions struct {
 	// IncludeSubsections applies to ModeReplaceSection only: replace the
 	// section's nested subsections as well as its own content.
 	IncludeSubsections bool
+	// NewHeading renames the target heading's text. ModeReplaceSection only;
+	// empty means the heading is left untouched. Plain text — it is escaped
+	// before it reaches the storage body.
+	NewHeading string
+}
+
+// HeadingRename records a heading rename that a splice performed.
+type HeadingRename struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 // BoundaryInfo describes where a splice landed and, for replace-section, what
@@ -59,6 +69,12 @@ type BoundaryInfo struct {
 	// requested extent, so the caller can see which way the boundary fell.
 	ReplacedSections  []string `json:"replaced_sections,omitempty"`
 	PreservedSections []string `json:"preserved_sections,omitempty"`
+	// HeadingRenamed is populated only when the splice renamed the target
+	// heading (replace only).
+	HeadingRenamed *HeadingRename `json:"heading_renamed,omitempty"`
+	// AnchorReferences describes on-page anchor references to the OLD heading
+	// text that a rename breaks. Advisory: they are reported, never rewritten.
+	AnchorReferences []string `json:"anchor_references,omitempty"`
 }
 
 // SpliceResult is the output of a successful Splice call.
@@ -73,6 +89,11 @@ var (
 	ErrHeadingInUnsafeContainer = errors.New("heading_in_unsafe_container")
 	ErrAmbiguousHeading         = errors.New("ambiguous_heading")
 	ErrNotImplemented           = errors.New("not_implemented")
+	// Rename errors. All three are raised before any body is assembled, so a
+	// rejected rename never leaves a half-edited page.
+	ErrRenameNoOp         = errors.New("rename_no_op")
+	ErrRenameAmbiguous    = errors.New("rename_ambiguous")
+	ErrHeadingHasChildren = errors.New("heading_has_children")
 )
 
 // Splice inserts or replaces content in a Confluence storage-format body
@@ -85,7 +106,7 @@ func Splice(body, fragment string, opts SpliceOptions) (SpliceResult, error) {
 	case ModeAfterHeading:
 		return spliceAfterHeading(body, fragment, opts.Heading)
 	case ModeReplaceSection:
-		return spliceReplaceSection(body, fragment, opts.Heading, opts.IncludeSubsections)
+		return spliceReplaceSection(body, fragment, opts)
 	case ModeEndOfSection:
 		return spliceEndOfSection(body, fragment, opts.Heading)
 	default:

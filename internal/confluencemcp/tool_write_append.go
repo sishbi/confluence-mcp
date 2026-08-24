@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/sishbi/confluence-mcp/internal/confluence"
 	"github.com/sishbi/confluence-mcp/internal/mdconv"
@@ -29,11 +30,14 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 	if mode != ModeEnd && item.Heading == "" {
 		return "", fmt.Errorf("heading is required for position %q", item.Position)
 	}
-	// include_subsections only widens a replace. Silently ignoring it on the
-	// other positions would let a caller believe a destructive option was
+	// Both of these only mean anything on a replace. Silently ignoring either on
+	// the other positions would let a caller believe a destructive option was
 	// honoured when it was dropped.
 	if item.IncludeSubsections && mode != ModeReplaceSection {
 		return "", fmt.Errorf(`include_subsections is only valid for position "replace_section"`)
+	}
+	if item.NewHeading != "" && mode != ModeReplaceSection {
+		return "", fmt.Errorf(`new_heading is only valid for position "replace_section"`)
 	}
 
 	// Convert fragment to storage if the agent sent markdown. The fragment is
@@ -58,10 +62,9 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 			inputFormat = "markdown"
 		}
 		preview := buildPreview(
-			item.PageID,
-			page.Body.Storage.Value, res.Merged, fragmentStorage,
-			mode, item.Heading, item.IncludeSubsections, res.Boundary,
-			item.Body, inputFormat,
+			item, mode,
+			page.Body.Storage.Value, res.Merged, fragmentStorage, inputFormat,
+			res.Boundary,
 		)
 		data, jerr := json.MarshalIndent(preview, "", "  ")
 		if jerr != nil {
@@ -120,7 +123,27 @@ func appendSuccessMsg(title, id, baseBody, mergedBody, fragment string, b Bounda
 	if len(b.PreservedSections) > 0 {
 		msg += fmt.Sprintf(" Preserved %s.", nestedSectionPhrase(b.PreservedSections))
 	}
+	if b.HeadingRenamed != nil {
+		msg += fmt.Sprintf(" Renamed heading %q → %q.", b.HeadingRenamed.From, b.HeadingRenamed.To)
+		if len(b.AnchorReferences) > 0 {
+			msg += " " + anchorWarningPhrase(b.AnchorReferences, b.HeadingRenamed.From)
+		}
+	}
 	return msg
+}
+
+// anchorWarningPhrase renders the on-page anchor references a rename breaks.
+// Named rather than counted-only, for the same reason nestedSectionPhrase names
+// subsections: a count alone leaves the caller unable to act on it.
+func anchorWarningPhrase(refs []string, oldHeading string) string {
+	noun, verb := "anchor references", "point"
+	if len(refs) == 1 {
+		noun, verb = "anchor reference", "points"
+	}
+	return fmt.Sprintf(
+		"Warning: %d on-page %s to %q now %s at a heading that no longer exists: %s.",
+		len(refs), noun, oldHeading, verb, strings.Join(refs, ", "),
+	)
 }
 
 // fetchAndSplice fetches the page's current storage body and applies the
@@ -135,6 +158,7 @@ func (h *handlers) fetchAndSplice(ctx context.Context, item WriteItem, mode Mode
 		Mode:               mode,
 		Heading:            item.Heading,
 		IncludeSubsections: item.IncludeSubsections,
+		NewHeading:         item.NewHeading,
 	})
 	if err != nil {
 		return nil, SpliceResult{}, err
