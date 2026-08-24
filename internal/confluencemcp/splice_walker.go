@@ -11,6 +11,11 @@ type walkEvent struct {
 	kind eventKind
 	// name is the element local name (for start/end events); empty otherwise.
 	name string
+	// space is the element's namespace prefix as written in the storage body —
+	// "ac" or "ri" for Confluence's own constructs, empty for plain XHTML.
+	// Confluence declares no namespaces, so Go's decoder reports the raw prefix
+	// here.
+	space string
 	// level is the heading level (1-6) when kind == eventHeadingStart; 0 otherwise.
 	level int
 	// tokStart, tokEnd are byte offsets into the original body for the token that
@@ -107,6 +112,7 @@ func walkStorage(body string, fn func(walkEvent) error) error {
 			ev := walkEvent{
 				kind:                 eventStart,
 				name:                 name,
+				space:                t.Name.Space,
 				tokStart:             adjStart,
 				tokEnd:               adjEnd,
 				layoutCellDepth:      layoutCellDepth,
@@ -125,6 +131,7 @@ func walkStorage(body string, fn func(walkEvent) error) error {
 			ev := walkEvent{
 				kind:     eventEnd,
 				name:     name,
+				space:    t.Name.Space,
 				tokStart: adjStart,
 				tokEnd:   adjEnd,
 			}

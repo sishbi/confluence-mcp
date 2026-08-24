@@ -6,13 +6,19 @@ Use `feat!:` or add `BREAKING CHANGE:` in the body for a breaking change.
 The title drives the release-please changelog when this PR is squash-merged.
 -->
 
-## Summary
+## Why
 
-<!-- What changed and why, in 1-3 bullets. -->
+<!-- The motivation that isn't obvious from the diff: the symptom, the missing capability, the wrong contract, the stale doc. One short paragraph. -->
+
+## What changed
+
+<!-- What the PR does. Avoid naming specific files or classes unless it matters for the wider context. -->
+
+-
 
 ## Test plan
 
-<!-- Checklist of how you verified the change. -->
+<!-- How you verified the change. -->
 
 - [ ] `task lint`
 - [ ] `task test`

@@ -38,6 +38,10 @@ type WriteItem struct {
 	// a replace stops at the section's first subsection, leaving subsections
 	// intact; set it to replace the whole section, subsections included.
 	IncludeSubsections bool `json:"include_subsections,omitempty"`
+	// NewHeading renames the target heading while replacing its content.
+	// Position "replace_section" only. Plain text — it is escaped before it
+	// reaches the page, and the heading's level is unchanged.
+	NewHeading string `json:"new_heading,omitempty"`
 	// ParentCommentID identifies the comment being replied to. Required for
 	// reply_comment; sent as parentCommentId on the wire and never alongside
 	// page_id — Confluence's reply create models reject the two together (D4).
@@ -165,6 +169,7 @@ var writeFields = []writeFieldSpec{
 	{"position", func(i WriteItem) bool { return i.Position != "" }},
 	{"heading", func(i WriteItem) bool { return i.Heading != "" }},
 	{"include_subsections", func(i WriteItem) bool { return i.IncludeSubsections }},
+	{"new_heading", func(i WriteItem) bool { return i.NewHeading != "" }},
 	{"parent_comment_id", func(i WriteItem) bool { return i.ParentCommentID != "" }},
 	{"comment_type", func(i WriteItem) bool { return i.CommentType != "" }},
 }
@@ -179,7 +184,7 @@ var writeFields = []writeFieldSpec{
 var permittedWriteFields = map[string]map[string]bool{
 	"create":        writeFieldSet("space_id", "title", "body", "format", "parent_id", "status", "page_id"),
 	"update":        writeFieldSet("page_id", "title", "body", "format", "version_number", "status"),
-	"append":        writeFieldSet("page_id", "body", "format", "position", "heading", "version_number", "include_subsections"),
+	"append":        writeFieldSet("page_id", "body", "format", "position", "heading", "version_number", "include_subsections", "new_heading"),
 	"delete":        writeFieldSet("page_id"),
 	"comment":       writeFieldSet("page_id", "body"),
 	"edit_comment":  writeFieldSet("comment_id", "body", "version_number"),

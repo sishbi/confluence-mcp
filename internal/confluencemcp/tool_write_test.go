@@ -748,6 +748,8 @@ func TestWriteTool_DescriptionMentionsAppend(t *testing.T) {
 	assert.Contains(t, desc, "end")
 	assert.Contains(t, desc, "after_heading")
 	assert.Contains(t, desc, "replace_section")
+	assert.Contains(t, desc, "new_heading",
+		"agents cannot use a field the tool description never names")
 }
 
 // TestWriteTool_DescriptionFormatActionNames guards against the write tool
@@ -963,6 +965,28 @@ func TestHandleWrite_FieldValidation(t *testing.T) {
 		_, err := h.dispatchWriteItem(context.Background(), "update", WriteItem{PageID: "1", VersionNumber: 1, CommentType: "footer"}, false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "comment_type")
+	})
+
+	t.Run("new_heading is rejected by every action but append", func(t *testing.T) {
+		items := map[string]WriteItem{
+			"create":        {SpaceID: "s", Title: "t"},
+			"update":        {PageID: "1", VersionNumber: 1},
+			"delete":        {PageID: "1"},
+			"comment":       {PageID: "1", Body: "hi"},
+			"edit_comment":  {CommentID: "1", Body: "hi", VersionNumber: 1},
+			"reply_comment": {ParentCommentID: "1", CommentType: "footer", Body: "hi"},
+			"add_label":     {PageID: "1", Label: "l"},
+			"remove_label":  {PageID: "1", Label: "l"},
+		}
+		for action, item := range items {
+			t.Run(action, func(t *testing.T) {
+				item.NewHeading = "New"
+				h := &handlers{client: &mockClient{}}
+				_, err := h.dispatchWriteItem(context.Background(), action, item, false)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "new_heading")
+			})
+		}
 	})
 
 	t.Run("parent_comment_id on comment errors", func(t *testing.T) {

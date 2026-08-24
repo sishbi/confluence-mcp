@@ -341,6 +341,88 @@ func TestAppend_IncludeSubsections_RejectedForOtherPositions(t *testing.T) {
 	}
 }
 
+func TestAppend_NewHeading_RejectedForOtherPositions(t *testing.T) {
+	h := &handlers{client: newAppendPageMock(appendTestLayoutBody, nil)}
+
+	for _, position := range []string{"end", "after_heading", "end_of_section"} {
+		t.Run(position, func(t *testing.T) {
+			_, err := h.writeAppend(context.Background(), WriteItem{
+				PageID: "p1", Body: "x", Position: position,
+				Heading: "Section A", NewHeading: "Section Z",
+			}, false)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "new_heading")
+		})
+	}
+}
+
+// TestAppend_ReplaceSection_RenamesHeading covers the whole rename path through
+// the handler: the PUT body carries the new heading, the response says so, and
+// the on-page anchor reference the rename breaks is named rather than left for
+// the caller to discover.
+func TestAppend_ReplaceSection_RenamesHeading(t *testing.T) {
+	const body = `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>` +
+		`<h2>Ticket map</h2><p>intro</p><h2>Next</h2>` +
+		`<p><ac:link ac:anchor="Ticket map"><ac:link-body>jump</ac:link-body></ac:link></p>` +
+		`</ac:layout-cell></ac:layout-section></ac:layout>`
+
+	item := WriteItem{
+		PageID: "p1", Body: "New intro.", Position: "replace_section",
+		Heading: "Ticket map", NewHeading: "Delivery map",
+	}
+
+	var captured map[string]any
+	h := &handlers{client: newAppendPageMock(body, &captured)}
+	msg, err := h.writeAppend(context.Background(), item, false)
+	require.NoError(t, err)
+	assert.Contains(t, msg, `Renamed heading "Ticket map" → "Delivery map".`)
+	assert.Contains(t, msg, `1 on-page anchor reference to "Ticket map"`)
+
+	value := captured["body"].(map[string]any)["storage"].(map[string]any)["value"].(string)
+	assert.Contains(t, value, "<h2>Delivery map</h2>")
+	assert.NotContains(t, value, "<h2>Ticket map</h2>")
+	assert.Contains(t, value, "New intro.")
+	assert.Contains(t, value, "<h2>Next</h2>", "the next section is never touched")
+
+	dryH := &handlers{client: newAppendPageMock(body, nil)}
+	preview, err := dryH.writeAppend(context.Background(), item, true)
+	require.NoError(t, err)
+	assert.Contains(t, preview, `rename it to \"Delivery map\"`)
+	// The preview is JSON, so its markup arrives \u-escaped.
+	assert.Contains(t, preview, `\u003ch2\u003eDelivery map\u003c/h2\u003e`,
+		"the preview's before-context must show the heading as it will be, not as it was")
+	assert.Contains(t, preview, `"new_heading": "Delivery map"`)
+	assert.Contains(t, preview, `"anchor_references"`)
+}
+
+func TestAppend_ReplaceSection_RejectsBadRename(t *testing.T) {
+	const body = `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>` +
+		`<h2>Ticket map</h2><p>intro</p><h2>Next</h2>` +
+		`</ac:layout-cell></ac:layout-section></ac:layout>`
+
+	tests := []struct {
+		name       string
+		newHeading string
+		wantInMsg  string
+	}{
+		{name: "same as current", newHeading: "Ticket map", wantInMsg: "rename_no_op"},
+		{name: "already on the page", newHeading: "Next", wantInMsg: "rename_ambiguous"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var captured map[string]any
+			h := &handlers{client: newAppendPageMock(body, &captured)}
+			_, err := h.writeAppend(context.Background(), WriteItem{
+				PageID: "p1", Body: "New intro.", Position: "replace_section",
+				Heading: "Ticket map", NewHeading: tt.newHeading,
+			}, false)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantInMsg)
+			assert.Nil(t, captured, "a rejected rename must not reach the update call")
+		})
+	}
+}
+
 func TestAppend_VersionMismatch(t *testing.T) {
 	h := &handlers{client: newAppendPageMock(appendTestLayoutBody, nil)}
 

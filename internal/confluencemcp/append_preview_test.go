@@ -13,7 +13,7 @@ func TestBuildPreview(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splice: %v", err)
 		}
-		p := buildPreview("42", base, res.Merged, fragment, ModeEnd, "", false, res.Boundary, "new", "markdown")
+		p := buildPreview(WriteItem{PageID: "42", Body: "new"}, ModeEnd, base, res.Merged, fragment, "markdown", res.Boundary)
 		if p.PageID != "42" {
 			t.Errorf("PageID = %q", p.PageID)
 		}
@@ -50,7 +50,7 @@ func TestBuildPreview(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splice: %v", err)
 		}
-		p := buildPreview("42", base, res.Merged, fragment, ModeAfterHeading, "A", false, res.Boundary, "new", "markdown")
+		p := buildPreview(WriteItem{PageID: "42", Body: "new", Heading: "A"}, ModeAfterHeading, base, res.Merged, fragment, "markdown", res.Boundary)
 		if p.Position != "after_heading" {
 			t.Errorf("Position = %q", p.Position)
 		}
@@ -70,7 +70,7 @@ func TestBuildPreview(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splice: %v", err)
 		}
-		p := buildPreview("42", base, res.Merged, fragment, ModeReplaceSection, "A", false, res.Boundary, "new", "markdown")
+		p := buildPreview(WriteItem{PageID: "42", Body: "new", Heading: "A"}, ModeReplaceSection, base, res.Merged, fragment, "markdown", res.Boundary)
 		if p.Position != "replace_section" {
 			t.Errorf("Position = %q", p.Position)
 		}
@@ -95,7 +95,7 @@ func TestBuildPreview(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splice: %v", err)
 		}
-		p := buildPreview("42", base, res.Merged, fragment, ModeEndOfSection, "A", false, res.Boundary, "new", "markdown")
+		p := buildPreview(WriteItem{PageID: "42", Body: "new", Heading: "A"}, ModeEndOfSection, base, res.Merged, fragment, "markdown", res.Boundary)
 		if p.Position != "end_of_section" {
 			t.Errorf("Position = %q, want end_of_section", p.Position)
 		}
@@ -134,7 +134,7 @@ func TestBuildPreview(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splice: %v", err)
 		}
-		p := buildPreview("42", base, res.Merged, fragment, ModeReplaceSection, "A", false, res.Boundary, "x", "markdown")
+		p := buildPreview(WriteItem{PageID: "42", Body: "x", Heading: "A"}, ModeReplaceSection, base, res.Merged, fragment, "markdown", res.Boundary)
 		if p.Sizes.DeltaBytes >= 0 {
 			t.Errorf("DeltaBytes should be negative, got %d", p.Sizes.DeltaBytes)
 		}
@@ -150,7 +150,7 @@ func replaceStr(pattern, v string) string {
 // because that body is what is being replaced.
 func TestContextAround_ReplaceSection(t *testing.T) {
 	base := `<h2>A</h2><p>old</p><h2>B</h2><p>other</p>`
-	before, after := contextAround(base, ModeReplaceSection, "A", false)
+	before, after := contextAround(base, ModeReplaceSection, WriteItem{Heading: "A"})
 	if !strings.HasSuffix(before, "<h2>A</h2>") {
 		t.Errorf("before should end at the target heading's closing tag: %q", before)
 	}
@@ -160,4 +160,39 @@ func TestContextAround_ReplaceSection(t *testing.T) {
 	if !strings.HasPrefix(after, "<h2>B</h2>") {
 		t.Errorf("after should begin at the next heading: %q", after)
 	}
+}
+
+// TestContextAround_ReplaceSection_Rename pins the rule that a preview shows
+// the page the write will produce: with a rename, the "before" snippet ends at
+// the NEW heading. Showing the old one would hide the change being previewed.
+func TestContextAround_ReplaceSection_Rename(t *testing.T) {
+	base := `<h2 ac:local-id="z">A</h2><p>old</p><h2>B</h2>`
+	before, after := contextAround(base, ModeReplaceSection, WriteItem{Heading: "A", NewHeading: "A & C"})
+	if !strings.HasSuffix(before, `<h2 ac:local-id="z">A &amp; C</h2>`) {
+		t.Errorf("before should end at the escaped new heading, attributes intact: %q", before)
+	}
+	if !strings.HasPrefix(after, "<h2>B</h2>") {
+		t.Errorf("after should begin at the next heading: %q", after)
+	}
+}
+
+func TestSummariseAction_Rename(t *testing.T) {
+	b := BoundaryInfo{AnchorReferences: []string{`ac:link ac:anchor="A"`}}
+
+	t.Run("names the rename and the broken anchors", func(t *testing.T) {
+		got := summariseAction(ModeReplaceSection, "A", "B", b)
+		if !strings.Contains(got, `rename it to "B"`) {
+			t.Errorf("summary does not name the rename: %q", got)
+		}
+		if !strings.Contains(got, "breaks 1 on-page anchor reference(s)") {
+			t.Errorf("summary does not name the broken anchors: %q", got)
+		}
+	})
+
+	t.Run("says nothing about a rename that was not requested", func(t *testing.T) {
+		got := summariseAction(ModeReplaceSection, "A", "", BoundaryInfo{})
+		if strings.Contains(got, "rename") || strings.Contains(got, "anchor") {
+			t.Errorf("summary invented a rename: %q", got)
+		}
+	})
 }

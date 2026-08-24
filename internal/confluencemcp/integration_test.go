@@ -125,6 +125,16 @@ func stubConfluence(t *testing.T) *httptest.Server {
 				if title, ok := body["title"].(string); ok {
 					page.Title = title
 				}
+				// Persist the written body: append's whole value is what the
+				// merged storage looks like afterwards, so a fake that discards
+				// it cannot tell a correct splice from a no-op.
+				if b, ok := body["body"].(map[string]any); ok {
+					if storage, ok := b["storage"].(map[string]any); ok {
+						if value, ok := storage["value"].(string); ok {
+							page.Body.Storage.Value = value
+						}
+					}
+				}
 				page.Version.Number++
 				pages[id] = page
 				_ = json.NewEncoder(w).Encode(page)
@@ -461,6 +471,43 @@ func TestIntegration_WriteUpdatePage(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
+}
+
+// TestIntegration_WriteAppendRenameSection drives the rename end-to-end: the
+// splice, the PUT, and the follow-up read that proves the heading really
+// changed on the stored page rather than only in the response text.
+func TestIntegration_WriteAppendRenameSection(t *testing.T) {
+	cs, cleanup := newIntegrationServer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	result, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name: "confluence_write",
+		Arguments: map[string]any{
+			"action": "append",
+			"items": []any{map[string]any{
+				"page_id":     "101",
+				"position":    "replace_section",
+				"heading":     "Backend",
+				"new_heading": "Backend services",
+				"body":        "Now written in Go 1.24.",
+			}},
+		},
+	})
+	require.NoError(t, err)
+	require.False(t, result.IsError, "append failed: %s", result.Content[0].(*mcp.TextContent).Text)
+	assert.Contains(t, result.Content[0].(*mcp.TextContent).Text, `Renamed heading "Backend" → "Backend services".`)
+
+	stored, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "confluence_read",
+		Arguments: map[string]any{"page_ids": []any{"101"}, "format": "storage"},
+	})
+	require.NoError(t, err)
+	body := stored.Content[0].(*mcp.TextContent).Text
+	assert.Contains(t, body, "<h2>Backend services</h2>")
+	assert.NotContains(t, body, "<h2>Backend</h2>")
+	assert.Contains(t, body, "Now written in Go 1.24.")
+	assert.Contains(t, body, "<h2>Frontend</h2>", "the following section is untouched")
 }
 
 func TestIntegration_WriteDeletePage(t *testing.T) {

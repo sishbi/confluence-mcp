@@ -12,6 +12,11 @@ type headingMatch struct {
 	headingStartOff int
 	// headingEndOff is the byte offset just past the closing tag in the body.
 	headingEndOff int
+	// headingOpenEndOff is the byte offset just past the opening tag, and
+	// headingCloseStartOff the offset of the closing tag. Together they bound
+	// the heading's inner XHTML, which is the range a rename rewrites.
+	headingOpenEndOff    int
+	headingCloseStartOff int
 	// layoutCellDepth, macroDepth, and unsafeContainerDepth recorded at the
 	// opening tag.
 	layoutCellDepth      int
@@ -29,45 +34,7 @@ type headingMatch struct {
 func locateHeading(body, heading string) (headingMatch, error) {
 	want := normalizeHeading(heading)
 
-	type candidate struct {
-		match headingMatch
-		safe  bool
-	}
-
-	var (
-		stack     []*candidate
-		collected []candidate
-	)
-
-	err := walkStorage(body, func(ev walkEvent) error {
-		switch ev.kind {
-		case eventHeadingStart:
-			c := &candidate{
-				match: headingMatch{
-					level:                ev.level,
-					headingStartOff:      ev.tokStart,
-					layoutCellDepth:      ev.layoutCellDepth,
-					macroDepth:           ev.macroDepth,
-					unsafeContainerDepth: ev.unsafeContainerDepth,
-				},
-				safe: ev.macroDepth == 0 && ev.unsafeContainerDepth == 0,
-			}
-			stack = append(stack, c)
-		case eventHeadingEnd:
-			if len(stack) == 0 {
-				return nil
-			}
-			top := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			top.match.headingEndOff = ev.tokEnd
-			collected = append(collected, *top)
-		case eventStart, eventEnd:
-			// Text extraction is handled by the XML decoder in walkStorage
-			// only for elements; we need a separate text capture for heading
-			// content. Handled by re-parsing below.
-		}
-		return nil
-	})
+	collected, err := collectHeadings(body)
 	if err != nil {
 		return headingMatch{}, err
 	}
@@ -79,8 +46,7 @@ func locateHeading(body, heading string) (headingMatch, error) {
 		unsafeMatches []headingMatch
 	)
 	for _, c := range collected {
-		text := extractText(body[c.match.headingStartOff:c.match.headingEndOff])
-		if normalizeHeading(text) != want {
+		if normalizeHeading(c.text(body)) != want {
 			continue
 		}
 		if c.safe {
@@ -100,6 +66,122 @@ func locateHeading(body, heading string) (headingMatch, error) {
 	default:
 		return headingMatch{}, ErrHeadingNotFound
 	}
+}
+
+// headingCandidate is one heading found by collectHeadings, with the safety
+// flag that decides whether locateHeading will consider it.
+type headingCandidate struct {
+	match headingMatch
+	safe  bool
+}
+
+// text returns the candidate's raw text content, tags stripped and entities
+// decoded. Not normalised — callers that compare do that themselves.
+func (c headingCandidate) text(body string) string {
+	return extractText(body[c.match.headingStartOff:c.match.headingEndOff])
+}
+
+// collectHeadings walks body once and returns every heading it contains, in
+// document order, each flagged safe or not. Shared by locateHeading (which
+// matches one) and headingTextsIn (which needs them all).
+func collectHeadings(body string) ([]headingCandidate, error) {
+	var (
+		stack     []*headingCandidate
+		collected []headingCandidate
+	)
+
+	err := walkStorage(body, func(ev walkEvent) error {
+		switch ev.kind {
+		case eventHeadingStart:
+			c := &headingCandidate{
+				match: headingMatch{
+					level:                ev.level,
+					headingStartOff:      ev.tokStart,
+					headingOpenEndOff:    ev.tokEnd,
+					layoutCellDepth:      ev.layoutCellDepth,
+					macroDepth:           ev.macroDepth,
+					unsafeContainerDepth: ev.unsafeContainerDepth,
+				},
+				safe: ev.macroDepth == 0 && ev.unsafeContainerDepth == 0,
+			}
+			stack = append(stack, c)
+		case eventHeadingEnd:
+			if len(stack) == 0 {
+				return nil
+			}
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			top.match.headingCloseStartOff = ev.tokStart
+			top.match.headingEndOff = ev.tokEnd
+			collected = append(collected, *top)
+		case eventStart, eventEnd:
+			// Text extraction is handled by the XML decoder in walkStorage
+			// only for elements; the heading's own text is recovered from the
+			// raw body by headingCandidate.text.
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return collected, nil
+}
+
+// headingTextsIn returns the normalised text of every heading in body that
+// locateHeading would treat as a candidate. Headings inside a macro or an
+// unsafe container are excluded: they can never be located, so they cannot
+// make a rename ambiguous.
+func headingTextsIn(body string) ([]string, error) {
+	collected, err := collectHeadings(body)
+	if err != nil {
+		return nil, err
+	}
+	texts := make([]string, 0, len(collected))
+	for _, c := range collected {
+		if c.safe {
+			texts = append(texts, normalizeHeading(c.text(body)))
+		}
+	}
+	return texts, nil
+}
+
+// headingConfluenceChildren returns the qualified names of the Confluence-only
+// element children inside the located heading, in document order,
+// deduplicated. These are the constructs a plain-text rename would destroy
+// without the caller ever having seen them as markup: mentions
+// (ac:link + ri:user), macros including status lozenges (ac:structured-macro),
+// and emoticons (ac:emoticon).
+//
+// Plain XHTML inline formatting (em, strong, code, span, …) is deliberately NOT
+// reported. It carries presentation only, the caller saw it in the Markdown
+// they read, and replacing it along with the words is exactly what a rename
+// means.
+func headingConfluenceChildren(body string, match headingMatch) []string {
+	inner := body[match.headingOpenEndOff:match.headingCloseStartOff]
+	var (
+		names []string
+		seen  = map[string]bool{}
+	)
+	// A malformed inner fragment yields no names rather than an error: the
+	// caller uses this to refuse a rename, and refusing on unparseable markup
+	// would be a worse answer than letting the rename through.
+	_ = walkStorage(inner, func(ev walkEvent) error {
+		if ev.kind != eventStart && ev.kind != eventHeadingStart {
+			return nil
+		}
+		// Confluence declares no namespaces, so any prefix at all marks one of
+		// its own constructs rather than plain XHTML.
+		if ev.space == "" {
+			return nil
+		}
+		qualified := ev.space + ":" + ev.name
+		if !seen[qualified] {
+			seen[qualified] = true
+			names = append(names, qualified)
+		}
+		return nil
+	})
+	return names
 }
 
 // normalizeHeading canonicalises a heading for comparison: decode common XML

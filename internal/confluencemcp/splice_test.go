@@ -257,6 +257,47 @@ func TestLocateHeading(t *testing.T) {
 	}
 }
 
+func TestLocateHeading_ReportsInnerRange(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		heading   string
+		wantInner string
+	}{
+		{
+			name:      "heading with attributes",
+			body:      `<p>before</p><h2 ac:local-id="x">Section A</h2><p>after</p>`,
+			heading:   "Section A",
+			wantInner: `Section A`,
+		},
+		{
+			name:      "heading with inline markup",
+			body:      `<h3>27. <em>Final</em> Notes</h3><p>x</p>`,
+			heading:   "27. Final Notes",
+			wantInner: `27. <em>Final</em> Notes`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			match, err := locateHeading(tc.body, tc.heading)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if got := tc.body[match.headingOpenEndOff:match.headingCloseStartOff]; got != tc.wantInner {
+				t.Errorf("inner range: got %q, want %q", got, tc.wantInner)
+			}
+			// The pre-existing offsets must still span the whole element, since
+			// the replace splice measures its region from headingEndOff.
+			outer := tc.body[match.headingStartOff:match.headingEndOff]
+			if !strings.HasPrefix(outer, fmt.Sprintf("<h%d", match.level)) ||
+				!strings.HasSuffix(outer, fmt.Sprintf("</h%d>", match.level)) {
+				t.Errorf("outer range %q does not span the whole heading element", outer)
+			}
+		})
+	}
+}
+
 func TestSplice_End(t *testing.T) {
 	t.Run("layout-wrapped body: inserts before innermost trailing layout-cell", func(t *testing.T) {
 		body := `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell><p>existing</p></ac:layout-cell></ac:layout-section></ac:layout>`
@@ -359,13 +400,71 @@ func TestSplice_AfterHeading(t *testing.T) {
 	})
 }
 
+func TestSplice_ReplaceSection_RenamesHeading(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		newHeading string
+		opts       SpliceOptions
+		want       string
+		wantRename *HeadingRename
+	}{
+		{
+			name:       "preserves level and attributes",
+			body:       `<h2 ac:local-id="z">Old</h2><p>old</p><h2>B</h2><p>keep</p>`,
+			newHeading: "New",
+			want:       `<h2 ac:local-id="z">New</h2><p>new</p><h2>B</h2><p>keep</p>`,
+			wantRename: &HeadingRename{From: "Old", To: "New"},
+		},
+		{
+			name:       "escapes markup characters in the new text",
+			body:       `<h2>Old</h2><p>old</p>`,
+			newHeading: `A & B <x>`,
+			want:       `<h2>A &amp; B &lt;x&gt;</h2><p>new</p>`,
+			wantRename: &HeadingRename{From: "Old", To: `A & B <x>`},
+		},
+		{
+			name:       "renames while replacing subsections",
+			body:       `<h2>Old</h2><p>old</p><h3>sub</h3><p>p</p><h2>B</h2>`,
+			newHeading: "New",
+			opts:       SpliceOptions{IncludeSubsections: true},
+			want:       `<h2>New</h2><p>new</p><h2>B</h2>`,
+			wantRename: &HeadingRename{From: "Old", To: "New"},
+		},
+		{
+			name: "no rename leaves the heading byte-identical",
+			body: `<h2 ac:local-id="z">Old</h2><p>old</p>`,
+			want: `<h2 ac:local-id="z">Old</h2><p>new</p>`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := tc.opts
+			opts.Heading = "Old"
+			opts.NewHeading = tc.newHeading
+
+			res, err := spliceReplaceSection(tc.body, `<p>new</p>`, opts)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if res.Merged != tc.want {
+				t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, tc.want)
+			}
+			if !reflect.DeepEqual(res.Boundary.HeadingRenamed, tc.wantRename) {
+				t.Errorf("HeadingRenamed = %+v, want %+v", res.Boundary.HeadingRenamed, tc.wantRename)
+			}
+		})
+	}
+}
+
 func TestSplice_ReplaceSection(t *testing.T) {
 	const cell = `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell>%s</ac:layout-cell></ac:layout-section></ac:layout>`
 
 	t.Run("stops at next same-level heading in same cell", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><p>old1</p><p>old2</p><h2>B</h2><p>keep</p>`)
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A", false)
+		res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "A"})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -384,7 +483,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("stops at next higher-level heading", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h3>A</h3><p>old</p><h2>Top</h2>`)
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A", false)
+		res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "A"})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -402,7 +501,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 		fragment := `<p>new</p>`
 
 		t.Run("default keeps every subsection", func(t *testing.T) {
-			res, err := spliceReplaceSection(body, fragment, "A", false)
+			res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "A"})
 			if err != nil {
 				t.Fatalf("unexpected err: %v", err)
 			}
@@ -427,7 +526,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 		})
 
 		t.Run("includeSubsections removes them", func(t *testing.T) {
-			res, err := spliceReplaceSection(body, fragment, "A", true)
+			res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "A", IncludeSubsections: true})
 			if err != nil {
 				t.Fatalf("unexpected err: %v", err)
 			}
@@ -450,7 +549,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 			plain := fmt.Sprintf(cell, `<h2>A</h2><p>p1</p><h2>B</h2>`)
 			want := fmt.Sprintf(cell, `<h2>A</h2><p>new</p><h2>B</h2>`)
 			for _, includeSubsections := range []bool{false, true} {
-				res, err := spliceReplaceSection(plain, fragment, "A", includeSubsections)
+				res, err := spliceReplaceSection(plain, fragment, SpliceOptions{Heading: "A", IncludeSubsections: includeSubsections})
 				if err != nil {
 					t.Fatalf("unexpected err: %v", err)
 				}
@@ -467,7 +566,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("stops at end of layout-cell when no later heading", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><p>old</p>`)
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A", false)
+		res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "A"})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -480,7 +579,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("next same-level heading in sibling column is ignored", func(t *testing.T) {
 		body := `<ac:layout><ac:layout-section ac:type="three_equal"><ac:layout-cell><h2>A</h2><p>old</p></ac:layout-cell><ac:layout-cell><h2>B</h2><p>other</p></ac:layout-cell></ac:layout-section></ac:layout>`
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A", false)
+		res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "A"})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -493,7 +592,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("next same-level heading in later section is ignored", func(t *testing.T) {
 		body := `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell><h2>A</h2><p>old</p></ac:layout-cell></ac:layout-section><ac:layout-section ac:type="fixed-width"><ac:layout-cell><h2>B</h2></ac:layout-cell></ac:layout-section></ac:layout>`
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A", false)
+		res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "A"})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -506,7 +605,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("no-layout page: extends to end of body when no later heading", func(t *testing.T) {
 		body := `<h2>A</h2><p>old</p>`
 		fragment := `<p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A", false)
+		res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "A"})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -518,7 +617,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 
 	t.Run("heading in macro returns ErrHeadingInUnsafeContainer", func(t *testing.T) {
 		body := `<ac:structured-macro ac:name="expand"><ac:rich-text-body><h3>T</h3></ac:rich-text-body></ac:structured-macro>`
-		_, err := spliceReplaceSection(body, `<p>new</p>`, "T", false)
+		_, err := spliceReplaceSection(body, `<p>new</p>`, SpliceOptions{Heading: "T"})
 		if !errors.Is(err, ErrHeadingInUnsafeContainer) {
 			t.Fatalf("got %v, want ErrHeadingInUnsafeContainer", err)
 		}
@@ -526,7 +625,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 
 	t.Run("heading in td returns ErrHeadingInUnsafeContainer", func(t *testing.T) {
 		body := `<table><tbody><tr><td><h4>T</h4></td></tr></tbody></table>`
-		_, err := spliceReplaceSection(body, `<p>new</p>`, "T", false)
+		_, err := spliceReplaceSection(body, `<p>new</p>`, SpliceOptions{Heading: "T"})
 		if !errors.Is(err, ErrHeadingInUnsafeContainer) {
 			t.Fatalf("got %v, want ErrHeadingInUnsafeContainer", err)
 		}
@@ -559,7 +658,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				res, err := spliceReplaceSection(tc.body, `<p>NEW</p>`, "A", false)
+				res, err := spliceReplaceSection(tc.body, `<p>NEW</p>`, SpliceOptions{Heading: "A"})
 				if err != nil {
 					t.Fatalf("unexpected err: %v", err)
 				}
@@ -572,7 +671,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 
 	t.Run("ReplacedElementSummary does not double-count when a nested container shares the top-level element's tag name", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><ul><li><ul><li><p>x</p></li></ul><p>y</p></li></ul><h2>B</h2>`)
-		res, err := spliceReplaceSection(body, `<p>new</p>`, "A", false)
+		res, err := spliceReplaceSection(body, `<p>new</p>`, SpliceOptions{Heading: "A"})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -604,7 +703,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				res, err := spliceReplaceSection(tc.body, `<p>new</p>`, "A", false)
+				res, err := spliceReplaceSection(tc.body, `<p>new</p>`, SpliceOptions{Heading: "A"})
 				if err != nil {
 					t.Fatalf("unexpected err: %v", err)
 				}
@@ -626,7 +725,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 
 	t.Run("ReplacedElementSummary counts top-level replaced elements", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><p>p1</p><p>p2</p><ul><li><p>li</p></li></ul><h2>B</h2>`)
-		res, err := spliceReplaceSection(body, `<p>new</p>`, "A", false)
+		res, err := spliceReplaceSection(body, `<p>new</p>`, SpliceOptions{Heading: "A"})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -647,7 +746,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("fragment that redundantly starts with the target heading is de-duplicated", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>Data scrubbing</h2><p>old</p><h2>B</h2>`)
 		fragment := `<h2>Data scrubbing</h2><p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "Data scrubbing", false)
+		res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "Data scrubbing"})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -660,7 +759,7 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("leading heading with different level but same text is stripped", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><p>old</p><h2>B</h2>`)
 		fragment := `<h3>A</h3><p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A", false)
+		res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "A"})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -673,13 +772,150 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	t.Run("leading heading with different text is preserved", func(t *testing.T) {
 		body := fmt.Sprintf(cell, `<h2>A</h2><p>old</p><h2>B</h2>`)
 		fragment := `<h3>Details</h3><p>new</p>`
-		res, err := spliceReplaceSection(body, fragment, "A", false)
+		res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "A"})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
 		want := fmt.Sprintf(cell, `<h2>A</h2><h3>Details</h3><p>new</p><h2>B</h2>`)
 		if res.Merged != want {
 			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
+
+	// A rename accepts either name at the head of the fragment: the agent may
+	// send the section as it was, or as it is about to become.
+	t.Run("rename strips a leading heading carrying either name", func(t *testing.T) {
+		body := `<h2>Old</h2><p>old</p><h2>B</h2>`
+		want := `<h2>New</h2><p>new</p><h2>B</h2>`
+		for _, fragment := range []string{
+			`<h2>Old</h2><p>new</p>`,
+			`<h2>New</h2><p>new</p>`,
+			`<p>new</p>`,
+		} {
+			res, err := spliceReplaceSection(body, fragment, SpliceOptions{Heading: "Old", NewHeading: "New"})
+			if err != nil {
+				t.Fatalf("fragment %q: unexpected err: %v", fragment, err)
+			}
+			if res.Merged != want {
+				t.Errorf("fragment %q\n got: %s\nwant: %s", fragment, res.Merged, want)
+			}
+		}
+	})
+
+	t.Run("rename keeps a leading heading naming a third section", func(t *testing.T) {
+		body := `<h2>Old</h2><p>old</p><h2>B</h2>`
+		res, err := spliceReplaceSection(body, `<h3>Details</h3><p>new</p>`, SpliceOptions{Heading: "Old", NewHeading: "New"})
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		want := `<h2>New</h2><h3>Details</h3><p>new</p><h2>B</h2>`
+		if res.Merged != want {
+			t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+		}
+	})
+}
+
+func TestSplice_ReplaceSection_RejectsBadRename(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		heading    string
+		newHeading string
+		wantErr    error
+		wantInMsg  string
+	}{
+		{
+			name:       "new text normalises equal to the old",
+			body:       `<h2>A &amp; B</h2><p>old</p>`,
+			heading:    "A & B",
+			newHeading: "A &  B",
+			wantErr:    ErrRenameNoOp,
+		},
+		{
+			name:       "new text names another heading on the page",
+			body:       `<h2>Old</h2><p>old</p><h2>Taken</h2><p>x</p>`,
+			heading:    "Old",
+			newHeading: "Taken",
+			wantErr:    ErrRenameAmbiguous,
+			wantInMsg:  "Taken",
+		},
+		{
+			name:       "heading holding a mention",
+			body:       `<h2>Owned by <ac:link><ri:user ri:account-id="u1"/></ac:link></h2><p>old</p>`,
+			heading:    "Owned by",
+			newHeading: "Owned by the team",
+			wantErr:    ErrHeadingHasChildren,
+			wantInMsg:  "ac:link",
+		},
+		{
+			name:       "heading holding a status lozenge macro",
+			body:       `<h2>Rollout <ac:structured-macro ac:name="status"><ac:parameter ac:name="title">Done</ac:parameter></ac:structured-macro></h2><p>old</p>`,
+			heading:    "Rollout Done",
+			newHeading: "Rollout complete",
+			wantErr:    ErrHeadingHasChildren,
+			wantInMsg:  "ac:structured-macro",
+		},
+		{
+			name:       "heading holding an emoticon",
+			body:       `<h2>Ship it <ac:emoticon ac:name="smile"/></h2><p>old</p>`,
+			heading:    "Ship it",
+			newHeading: "Shipped",
+			wantErr:    ErrHeadingHasChildren,
+			wantInMsg:  "ac:emoticon",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := spliceReplaceSection(tc.body, `<p>new</p>`, SpliceOptions{
+				Heading: tc.heading, NewHeading: tc.newHeading,
+			})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("got err %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantInMsg != "" && !strings.Contains(err.Error(), tc.wantInMsg) {
+				t.Errorf("error %q does not name %q", err, tc.wantInMsg)
+			}
+			if res.Merged != "" {
+				t.Errorf("no merged body should be produced on a rejected rename, got %q", res.Merged)
+			}
+		})
+	}
+
+	// A heading that is only a candidate inside a macro or unsafe container can
+	// never be located, so renaming onto its text cannot create an ambiguity.
+	t.Run("heading inside a macro does not make the new name ambiguous", func(t *testing.T) {
+		body := `<h2>Old</h2><p>old</p><ac:structured-macro ac:name="expand"><ac:rich-text-body><h2>Taken</h2></ac:rich-text-body></ac:structured-macro>`
+		if _, err := spliceReplaceSection(body, `<p>new</p>`, SpliceOptions{Heading: "Old", NewHeading: "Taken"}); err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+	})
+
+	t.Run("entities and whitespace alone are not element children", func(t *testing.T) {
+		body := `<h2> A &amp; B </h2><p>old</p>`
+		if _, err := spliceReplaceSection(body, `<p>new</p>`, SpliceOptions{Heading: "A & B", NewHeading: "C"}); err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+	})
+
+	// Inline formatting is markup the caller DID see in the Markdown they read,
+	// and it carries nothing but presentation — renaming replaces it along with
+	// the words, which is what the caller asked for.
+	t.Run("inline formatting is renamed, not refused", func(t *testing.T) {
+		for _, body := range []string{
+			`<h2>27. <em>Final</em> Notes</h2><p>old</p>`,
+			`<h2>27. <strong>Final</strong> <code>Notes</code></h2><p>old</p>`,
+			`<h2>27. <span class="x">Final</span> Notes</h2><p>old</p>`,
+		} {
+			res, err := spliceReplaceSection(body, `<p>new</p>`, SpliceOptions{
+				Heading: "27. Final Notes", NewHeading: "28. Notes",
+			})
+			if err != nil {
+				t.Fatalf("body %q: unexpected err: %v", body, err)
+			}
+			if want := `<h2>28. Notes</h2><p>new</p>`; res.Merged != want {
+				t.Errorf("body %q\n got: %s\nwant: %s", body, res.Merged, want)
+			}
 		}
 	})
 }
