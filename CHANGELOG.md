@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.14](https://github.com/sishbi/confluence-mcp/compare/v0.0.13...v0.0.14) (2026-08-25)
+
+
+### Features
+
+* edit the page preamble with append ([#39](https://github.com/sishbi/confluence-mcp/issues/39)) ([b6062b1](https://github.com/sishbi/confluence-mcp/commit/b6062b17b60d2c5e7fb70f02ca0ba1c40210fe72))
+
 ## [0.0.13](https://github.com/sishbi/confluence-mcp/compare/v0.0.12...v0.0.13) (2026-08-24)
 
 
