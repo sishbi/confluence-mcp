@@ -23,6 +23,16 @@ const (
 	// after the section's existing content, before the next
 	// same-or-higher-level heading or the close of the containing layout-cell.
 	ModeEndOfSection
+	// ModeStart inserts the fragment at the very start of the CONTAINER: byte 0
+	// of the body, or just past the opening tag of the first <ac:layout-cell>
+	// when the body has a layout wrapper. Unlike every other mode it needs no
+	// heading — a headless page still has a well-defined "start".
+	ModeStart
+	// ModeReplacePreamble replaces the CONTAINER's preamble — everything from
+	// its start up to (not including) its first locatable heading — with the
+	// fragment. Unlike ModeStart, this needs that first heading to bound the
+	// replaced range, so a page with no heading at all is an error.
+	ModeReplacePreamble
 )
 
 // SpliceOptions configures a Splice call.
@@ -44,14 +54,15 @@ type HeadingRename struct {
 	To   string `json:"to"`
 }
 
-// BoundaryInfo describes where a splice landed and, for replace-section, what
-// was removed. Fields are populated per mode; unused fields are left zero.
+// BoundaryInfo describes where a splice landed and, for the replacing modes,
+// what was removed. Fields are populated per mode; unused fields are left zero.
 // JSON tags match the preview shape documented in the append design doc.
 type BoundaryInfo struct {
-	// InsertAnchor is populated for ModeEnd, ModeAfterHeading, and
-	// ModeEndOfSection.
+	// InsertAnchor is populated by the inserting modes: ModeEnd,
+	// ModeAfterHeading, ModeEndOfSection, and ModeStart.
 	InsertAnchor string `json:"insert_anchor,omitempty"`
-	// StartAnchor and EndAnchor describe the replaced range for ModeReplaceSection.
+	// StartAnchor and EndAnchor describe the replaced range, for
+	// ModeReplaceSection and ModeReplacePreamble.
 	StartAnchor string `json:"start_anchor,omitempty"`
 	EndAnchor   string `json:"end_anchor,omitempty"`
 	// Container names the structural container the splice happened inside.
@@ -61,16 +72,18 @@ type BoundaryInfo struct {
 	CrossesLayout bool `json:"crosses_layout"`
 	// ReplacedByteCount is the byte length of the removed region (replace only).
 	ReplacedByteCount int `json:"replaced_byte_count,omitempty"`
-	// ReplacedElementSummary is a tag-count histogram of top-level replaced
-	// elements, e.g. ["<p> x 2", "<ul> x 1"].
+	// ReplacedElementSummary is a histogram of the top-level elements removed,
+	// e.g. ["<p> x 2", `macro "toc" x 1`] — macros named, not counted as bare
+	// tags, so the caller sees which macro is about to be destroyed.
 	ReplacedElementSummary []string `json:"replaced_element_summary,omitempty"`
 	// ReplacedSections and PreservedSections name the target section's nested
-	// subsection headings (replace only). Exactly one is populated, per the
-	// requested extent, so the caller can see which way the boundary fell.
+	// subsection headings (ModeReplaceSection only). Exactly one is populated,
+	// per the requested extent, so the caller can see which way the boundary
+	// fell.
 	ReplacedSections  []string `json:"replaced_sections,omitempty"`
 	PreservedSections []string `json:"preserved_sections,omitempty"`
 	// HeadingRenamed is populated only when the splice renamed the target
-	// heading (replace only).
+	// heading (ModeReplaceSection only).
 	HeadingRenamed *HeadingRename `json:"heading_renamed,omitempty"`
 	// AnchorReferences describes on-page anchor references to the OLD heading
 	// text that a rename breaks. Advisory: they are reported, never rewritten.
@@ -94,6 +107,18 @@ var (
 	ErrRenameNoOp         = errors.New("rename_no_op")
 	ErrRenameAmbiguous    = errors.New("rename_ambiguous")
 	ErrHeadingHasChildren = errors.New("heading_has_children")
+	// ErrNoHeadingOnPage is returned by ModeReplacePreamble when the container
+	// (the first layout-cell, else the whole document) holds no locatable
+	// heading, leaving the preamble with no boundary to stop at.
+	ErrNoHeadingOnPage = errors.New("no_heading_on_page")
+	// Boundary-imbalance errors, one per replacing mode: a plain wrapper (e.g.
+	// <div>) opens inside the replaced range and closes outside it, so
+	// splicing would delete the opening tag and orphan the closing one. Rare
+	// in a Confluence-authored body (its own wrapper tags all move one of the
+	// walker's depth counters) but reachable via format="storage"; the caller
+	// should use action "update" instead.
+	ErrPreambleBoundaryUnbalanced = errors.New("preamble_boundary_unbalanced")
+	ErrSectionBoundaryUnbalanced  = errors.New("section_boundary_unbalanced")
 )
 
 // Splice inserts or replaces content in a Confluence storage-format body
@@ -109,6 +134,10 @@ func Splice(body, fragment string, opts SpliceOptions) (SpliceResult, error) {
 		return spliceReplaceSection(body, fragment, opts)
 	case ModeEndOfSection:
 		return spliceEndOfSection(body, fragment, opts.Heading)
+	case ModeStart:
+		return spliceStart(body, fragment)
+	case ModeReplacePreamble:
+		return spliceReplacePreamble(body, fragment)
 	default:
 		return SpliceResult{}, ErrNotImplemented
 	}

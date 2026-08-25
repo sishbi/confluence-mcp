@@ -815,6 +815,52 @@ func TestSplice_ReplaceSection(t *testing.T) {
 	})
 }
 
+func TestSplice_ReplaceSection_SummarisesMacros(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "named macro sits between two paragraphs",
+			body: `<h2>A</h2><p>a</p><ac:structured-macro ac:name="toc"/><p>b</p><h2>B</h2>`,
+			want: []string{"<p> x 2", `macro "toc" x 1`},
+		},
+		{
+			name: "macro with no ac:name attribute",
+			body: `<h2>A</h2><ac:structured-macro/><h2>B</h2>`,
+			want: []string{"<ac:structured-macro> x 1"},
+		},
+		{
+			name: "two macros with the same name collapse into one entry",
+			body: `<h2>A</h2><ac:structured-macro ac:name="toc"/><ac:structured-macro ac:name="toc"/><h2>B</h2>`,
+			want: []string{`macro "toc" x 2`},
+		},
+		{
+			name: "two macros with different names stay separate entries",
+			body: `<h2>A</h2><ac:structured-macro ac:name="toc"/><ac:structured-macro ac:name="info"/><h2>B</h2>`,
+			want: []string{`macro "toc" x 1`, `macro "info" x 1`},
+		},
+		{
+			name: "macro nested inside a top-level sibling is not counted separately",
+			body: `<h2>A</h2><p>text <ac:structured-macro ac:name="toc"/></p><h2>B</h2>`,
+			want: []string{"<p> x 1"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := spliceReplaceSection(tc.body, `<p>new</p>`, SpliceOptions{Heading: "A"})
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if !reflect.DeepEqual(res.Boundary.ReplacedElementSummary, tc.want) {
+				t.Errorf("ReplacedElementSummary = %v, want %v", res.Boundary.ReplacedElementSummary, tc.want)
+			}
+		})
+	}
+}
+
 func TestSplice_ReplaceSection_RejectsBadRename(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -1117,5 +1163,78 @@ func TestSplice_EndOfSection(t *testing.T) {
 		if res.Boundary.InsertAnchor != "end of ac:layout-cell" {
 			t.Errorf("got InsertAnchor %q, want %q", res.Boundary.InsertAnchor, "end of ac:layout-cell")
 		}
+	})
+}
+
+// TestSpliceSection_BoundaryBalance covers the pre-existing defect (not a
+// regression of this branch — the merge-base produces the identical corrupt
+// body) where findSectionExtent's chosen stop lands inside a plain wrapper
+// (e.g. <div>) that opens before it but does not close before it: neither the
+// next-heading check nor the layout-cell-close check that choose stop ever
+// look at a wrapper that moves none of the three depth counters, so the stop
+// can land strictly inside one. Replacing [headingEndOff, stop) then deletes
+// the wrapper's own opening tag while its closing tag survives further down
+// the page, orphaned.
+//
+// end_of_section is deliberately NOT covered by the same refusal: it only
+// INSERTS at stop, never deletes anything before it, and stop is always a
+// genuine token boundary (a heading start, a layout-cell close, or the end of
+// the body) — so an insert there is always well-formed, only nested one level
+// deeper inside the wrapper than the caller might expect. Refusing a safe
+// insert would be exactly the over-correction the boundary-balance guard
+// elsewhere is written to avoid.
+func TestSpliceSection_BoundaryBalance(t *testing.T) {
+	t.Run("narrow stop (subsection heading) lands inside a div that closes later: replace_section refused, wide extent succeeds", func(t *testing.T) {
+		body := `<h2>Target</h2><div><p>inside</p><h3>Sub</h3><p>subbody</p></div><h2>Next</h2>`
+
+		t.Run("default (narrow) extent is refused", func(t *testing.T) {
+			res, err := spliceReplaceSection(body, `<p>NEW</p>`, SpliceOptions{Heading: "Target"})
+			if !errors.Is(err, ErrSectionBoundaryUnbalanced) {
+				t.Fatalf("got err %v, want ErrSectionBoundaryUnbalanced", err)
+			}
+			if res.Merged != "" {
+				t.Errorf("no merged body should be produced when the boundary is unbalanced, got %q", res.Merged)
+			}
+		})
+
+		t.Run("include_subsections extent stops after the div closes: succeeds", func(t *testing.T) {
+			res, err := spliceReplaceSection(body, `<p>NEW</p>`, SpliceOptions{Heading: "Target", IncludeSubsections: true})
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			want := `<h2>Target</h2><p>NEW</p><h2>Next</h2>`
+			if res.Merged != want {
+				t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+			}
+		})
+	})
+
+	t.Run("the next same-level heading itself sits inside the unclosed div: both extents refused for replace_section", func(t *testing.T) {
+		body := `<h2>Target</h2><div><p>inside</p><h2>Next</h2><p>after</p></div><h2>Following</h2>`
+
+		for _, includeSubsections := range []bool{false, true} {
+			t.Run(fmt.Sprintf("includeSubsections=%v", includeSubsections), func(t *testing.T) {
+				res, err := spliceReplaceSection(body, `<p>NEW</p>`, SpliceOptions{
+					Heading: "Target", IncludeSubsections: includeSubsections,
+				})
+				if !errors.Is(err, ErrSectionBoundaryUnbalanced) {
+					t.Fatalf("got err %v, want ErrSectionBoundaryUnbalanced", err)
+				}
+				if res.Merged != "" {
+					t.Errorf("no merged body should be produced when the boundary is unbalanced, got %q", res.Merged)
+				}
+			})
+		}
+
+		t.Run("end_of_section inserts inside the div instead of refusing", func(t *testing.T) {
+			res, err := spliceEndOfSection(body, `<p>NEW</p>`, "Target")
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			want := `<h2>Target</h2><div><p>inside</p><p>NEW</p><h2>Next</h2><p>after</p></div><h2>Following</h2>`
+			if res.Merged != want {
+				t.Errorf("merged mismatch\n got: %s\nwant: %s", res.Merged, want)
+			}
+		})
 	})
 }

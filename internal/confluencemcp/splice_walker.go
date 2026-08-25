@@ -18,6 +18,10 @@ type walkEvent struct {
 	space string
 	// level is the heading level (1-6) when kind == eventHeadingStart; 0 otherwise.
 	level int
+	// macroName is the ac:name attribute value on a structured-macro start
+	// event; empty for every other event, and for a structured-macro with no
+	// ac:name attribute.
+	macroName string
 	// tokStart, tokEnd are byte offsets into the original body for the token that
 	// produced this event — inclusive/exclusive.
 	tokStart int
@@ -122,6 +126,14 @@ func walkStorage(body string, fn func(walkEvent) error) error {
 			if isHeadingName(name) {
 				ev.kind = eventHeadingStart
 				ev.level = int(name[1] - '0')
+			}
+			if name == "structured-macro" {
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "name" {
+						ev.macroName = attr.Value
+						break
+					}
+				}
 			}
 			if err := fn(ev); err != nil {
 				return err

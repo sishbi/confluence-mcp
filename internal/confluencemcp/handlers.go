@@ -99,7 +99,6 @@ func (h *handlers) ensureMacroRegistry(ctx context.Context, pageID string) *mdco
 		return reg
 	}
 	h.logger().DebugContext(ctx, "cache_miss", "page_id", pageID, "type", "macro_registry")
-	// Cache miss — re-fetch and re-extract.
 	page, err := h.client.GetPage(ctx, pageID)
 	if err != nil {
 		return nil

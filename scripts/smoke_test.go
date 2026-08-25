@@ -443,6 +443,22 @@ func TestSmoke_WriteAddAndRemoveLabel(t *testing.T) {
 // Looks for "**Version:** N" in the header line.
 var versionRe = regexp.MustCompile(`\*\*Version:\*\*\s+(\d+)`)
 
+// firstHeadingRe matches an opening heading tag (<h1> through <h6>, any
+// attributes) plus the plain-text run immediately inside it, stopping at the
+// next tag. Used by the start/replace_preamble smoke cases below, which must
+// not assume any specific fixture heading — unlike the other append smoke
+// tests, which target known numbered sections on the fixture page.
+var firstHeadingRe = regexp.MustCompile(`<h[1-6][^>]*>[^<]+`)
+
+// firstHeadingMatch returns the byte offset and matched text of the first
+// heading tag found in storage.
+func firstHeadingMatch(t *testing.T, storage string) (idx int, match string) {
+	t.Helper()
+	loc := firstHeadingRe.FindStringIndex(storage)
+	require.NotNil(t, loc, "expected at least one heading on the smoke test fixture page")
+	return loc[0], storage[loc[0]:loc[1]]
+}
+
 func extractVersion(text string) int {
 	m := versionRe.FindStringSubmatch(text)
 	if m == nil {
@@ -1268,4 +1284,143 @@ func TestSmoke_Append_StorageMacro(t *testing.T) {
 	assert.Equal(t, originalMacros+1, updatedMacros,
 		"expected macro count to increase by 1, got %d -> %d", originalMacros, updatedMacros)
 	assert.Contains(t, storage, `ac:name="note"`, "storage should contain the appended note macro")
+}
+
+// TestSmoke_Append_Start exercises position="start" against a live page: the
+// fragment lands at the very top of the container (the page itself, or its
+// first layout-cell if the fixture has one) — strictly before the page's
+// first heading — and that heading survives untouched. Content-agnostic on
+// purpose: "start" needs no heading argument, so unlike the other append
+// smoke tests it does not target a specific known section, only "wherever
+// the first heading actually is, the sentinel lands above it".
+func TestSmoke_Append_Start(t *testing.T) {
+	pageID := smokePageID()
+	if pageID == "" {
+		t.Skip("SMOKE_PAGE_ID not set")
+	}
+	env := newLiveEnv(t)
+	original := snapshotAndRestorePage(t, env, pageID)
+	_, wantHeading := firstHeadingMatch(t, original.Body.Storage.Value)
+
+	sentinel := fmt.Sprintf("Smoke start sentinel %d", time.Now().UnixNano())
+
+	text := callTool(t, env.session, "confluence_write", map[string]any{
+		"action": "append",
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     sentinel,
+			"position": "start",
+		}},
+	})
+	assert.Contains(t, text, "Appended to")
+
+	updated, err := env.client.GetPage(context.Background(), pageID)
+	require.NoError(t, err)
+
+	storage := updated.Body.Storage.Value
+	assert.Contains(t, storage, sentinel, "sentinel missing from updated page")
+	assert.Contains(t, storage, wantHeading, "the page's first heading must survive")
+	sentinelIdx := strings.Index(storage, sentinel)
+	headingIdx := strings.Index(storage, wantHeading)
+	require.Positive(t, sentinelIdx, "sentinel missing")
+	require.GreaterOrEqual(t, headingIdx, 0, "first heading missing")
+	assert.Less(t, sentinelIdx, headingIdx, "sentinel should land above the page's first heading")
+}
+
+// TestSmoke_Append_ReplacePreamble exercises position="replace_preamble"
+// against a live page: everything before the page's first heading is
+// replaced, and the heading plus everything from it onward — the following
+// section included — is byte-identical to before. Content-agnostic for the
+// same reason as TestSmoke_Append_Start: only the boundary is asserted, not
+// the fixture's specific preamble wording.
+func TestSmoke_Append_ReplacePreamble(t *testing.T) {
+	pageID := smokePageID()
+	if pageID == "" {
+		t.Skip("SMOKE_PAGE_ID not set")
+	}
+	env := newLiveEnv(t)
+	original := snapshotAndRestorePage(t, env, pageID)
+	headingIdx, _ := firstHeadingMatch(t, original.Body.Storage.Value)
+	wantSuffix := original.Body.Storage.Value[headingIdx:]
+
+	// Seed a preamble before replacing one. The fixture page opens with its
+	// first heading, so its preamble is zero-length and a replace there
+	// degenerates to an insert — which proves the position is wired up but
+	// never exercises the destructive path the feature exists for. Seeding via
+	// "start" gives the replace something real to destroy. The seed lands above
+	// the first heading, so wantSuffix above is unaffected by it.
+	seed := fmt.Sprintf("Smoke preamble seed %d", time.Now().UnixNano())
+	callTool(t, env.session, "confluence_write", map[string]any{
+		"action": "append",
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     seed,
+			"position": "start",
+		}},
+	})
+	seeded, err := env.client.GetPage(context.Background(), pageID)
+	require.NoError(t, err)
+	require.Contains(t, seeded.Body.Storage.Value, seed,
+		"seed preamble missing — without it the replace below destroys nothing and proves nothing")
+
+	sentinel := fmt.Sprintf("Smoke replace_preamble sentinel %d", time.Now().UnixNano())
+
+	text := callTool(t, env.session, "confluence_write", map[string]any{
+		"action": "append",
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     sentinel,
+			"position": "replace_preamble",
+		}},
+	})
+	assert.Contains(t, text, "Appended to")
+	// The destroyed content must be NAMED, not left to a byte delta. Silent
+	// live-page loss is the defect this feature was built to prevent, and a
+	// smoke test that only checked the write succeeded would not have caught
+	// it. Asserted loosely on the element rather than an exact count, so the
+	// test survives the fixture page gaining a preamble of its own.
+	assert.Contains(t, text, "(replaces ",
+		"the response must name what the replace destroyed")
+	assert.Contains(t, text, "<p>",
+		"the seeded paragraph must appear in the replaced-element summary")
+
+	updated, err := env.client.GetPage(context.Background(), pageID)
+	require.NoError(t, err)
+
+	storage := updated.Body.Storage.Value
+	assert.Contains(t, storage, sentinel, "sentinel missing from updated page")
+	assert.NotContains(t, storage, seed, "the seeded preamble must have been replaced, not appended to")
+	assert.True(t, strings.HasSuffix(storage, wantSuffix),
+		"the first heading and everything from it onward must be byte-identical to before")
+}
+
+// TestSmoke_Append_ReplacePreamble_RejectsHeading exercises the field
+// validation for replace_preamble live: unlike every heading-scoped
+// position, it takes no heading, and the rejection must happen before the
+// PUT — a caller who guesses wrong must never risk a partial write.
+func TestSmoke_Append_ReplacePreamble_RejectsHeading(t *testing.T) {
+	pageID := smokePageID()
+	if pageID == "" {
+		t.Skip("SMOKE_PAGE_ID not set")
+	}
+	env := newLiveEnv(t)
+	original := snapshotAndRestorePage(t, env, pageID)
+
+	text := callTool(t, env.session, "confluence_write", map[string]any{
+		"action": "append",
+		"items": []any{map[string]any{
+			"page_id":  pageID,
+			"body":     "Smoke replace_preamble rejection sentinel",
+			"position": "replace_preamble",
+			"heading":  "Some heading",
+		}},
+	})
+	assert.Contains(t, text, `heading is not valid for position "replace_preamble"`)
+
+	updated, err := env.client.GetPage(context.Background(), pageID)
+	require.NoError(t, err)
+	assert.Equal(t, original.Body.Storage.Value, updated.Body.Storage.Value,
+		"a rejected replace_preamble must not touch the page")
+	assert.Equal(t, original.Version.Number, updated.Version.Number,
+		"a rejected replace_preamble must not bump the version")
 }

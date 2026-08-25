@@ -72,7 +72,6 @@ func chunkPage(md string, sections []section, pageID string, c *chunkCursor) (st
 	end := len(md)
 	next := ""
 
-	// Locate H2 cut points at or after start.
 	for i, s := range sections {
 		if s.Level != 2 || s.Start < start {
 			continue
