@@ -53,14 +53,12 @@ func handleCodeMacros(s string, log *ConversionLog) string {
 	remaining := s
 
 	for {
-		// Find the next opening tag.
 		startIdx := strings.Index(remaining, openTag)
 		if startIdx == -1 {
 			result.WriteString(remaining)
 			break
 		}
 
-		// Find the end of the opening tag (>).
 		openEnd := strings.Index(remaining[startIdx:], ">")
 		if openEnd == -1 {
 			result.WriteString(remaining)
@@ -69,21 +67,16 @@ func handleCodeMacros(s string, log *ConversionLog) string {
 		openEnd += startIdx // absolute index of '>'
 		openTagFull := remaining[startIdx : openEnd+1]
 
-		// Check if this is a code macro.
 		if !strings.Contains(openTagFull, codeMacroPrefix) {
-			// Not a code macro — emit up to and including the opening tag and continue.
 			result.WriteString(remaining[:openEnd+1])
 			remaining = remaining[openEnd+1:]
 			continue
 		}
 
-		// Emit everything before this macro.
 		result.WriteString(remaining[:startIdx])
 
-		// Find the earliest </ac:structured-macro> after the opening tag.
 		closeStart := strings.Index(remaining[openEnd+1:], closeTag)
 		if closeStart == -1 {
-			// No closing tag — emit as-is and stop.
 			result.WriteString(remaining[startIdx:])
 			remaining = ""
 			break
@@ -276,19 +269,16 @@ func handleTaskLists(s string, log *ConversionLog) string {
 			}
 			taskInner := taskSub[1]
 
-			// Extract status.
 			statusSub := reTaskStatus.FindStringSubmatch(taskInner)
 			status := ""
 			if statusSub != nil {
 				status = strings.TrimSpace(statusSub[1])
 			}
 
-			// Extract body.
 			bodySub := reTaskBody.FindStringSubmatch(taskInner)
 			body := ""
 			if bodySub != nil {
 				body = strings.TrimSpace(bodySub[1])
-				// Strip placeholder-inline-tasks span wrapper.
 				body = rePlaceholderSpan.ReplaceAllString(body, "$1")
 				body = strings.TrimSpace(body)
 			}

@@ -133,7 +133,6 @@ func tableFragmentToMarkdown(fragment string, log *ConversionLog) (string, error
 		return "", nil
 	}
 
-	// Expand colspan/rowspan into a rectangular grid.
 	grid := expandGrid(rows, log)
 	if len(grid) == 0 {
 		return "", nil

@@ -149,7 +149,6 @@ func anonymiseNode(n *html.Node) {
 		case "code", "pre", "script", "style":
 			return
 		}
-		// Anonymise all attribute values except structural ones
 		for i := range n.Attr {
 			if preserveAttrs[n.Attr[i].Key] || n.Attr[i].Val == "" {
 				continue
@@ -191,14 +190,12 @@ func anonymiseURL(original string) string {
 		return original
 	}
 
-	// Hash the original URL to get a deterministic seed
 	h := sha256.Sum256([]byte(original))
 	seed := int64(h[0])<<56 | int64(h[1])<<48 | int64(h[2])<<40 |
 		int64(h[3])<<32 | int64(h[4])<<24 | int64(h[5])<<16 |
 		int64(h[6])<<8 | int64(h[7])
 	r := rand.New(rand.NewSource(seed))
 
-	// Preserve scheme if present
 	scheme := ""
 	rest := original
 	if idx := strings.Index(original, "://"); idx != -1 {
@@ -206,7 +203,6 @@ func anonymiseURL(original string) string {
 		rest = original[idx+3:]
 	}
 
-	// Generate a fake path with the same number of segments
 	parts := strings.Split(rest, "/")
 	for i := range parts {
 		if parts[i] != "" {
