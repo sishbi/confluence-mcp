@@ -18,6 +18,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Fixture bodies for the append position round-trip table
+// (TestIntegration_WriteAppendPositions): a layout-wrapped page with no
+// preamble content for "start", a headed page with preamble content for
+// "replace_preamble", and a headless page for the rejection case.
+const (
+	layoutStartFixtureBody = `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell><h1>Onboarding</h1><p>Existing content.</p></ac:layout-cell></ac:layout-section></ac:layout>`
+	preambleFixtureBody    = `<p>Scope note.</p><ac:structured-macro ac:name="toc"></ac:structured-macro><h1>Overview</h1><p>Section one content.</p><h2>Details</h2><p>More detail.</p>`
+	headlessFixtureBody    = `<p>Just a paragraph, no heading anywhere on this page.</p>`
+)
+
 // stubConfluence returns an httptest.Server that simulates the Confluence Cloud API.
 // It maintains a minimal in-memory state for pages, comments, and labels.
 func stubConfluence(t *testing.T) *httptest.Server {
@@ -52,6 +62,30 @@ func stubConfluence(t *testing.T) *httptest.Server {
 					`<p>Regular discussion points.</p>` +
 					`<ac:structured-macro ac:name="expand"><ac:parameter ac:name="title">Action Items</ac:parameter><ac:rich-text-body><p>Follow up with team.</p></ac:rich-text-body></ac:structured-macro>` +
 					`<ac:structured-macro ac:name="status"><ac:parameter ac:name="title">In Progress</ac:parameter><ac:parameter ac:name="colour">Yellow</ac:parameter></ac:structured-macro>`,
+			}},
+		},
+		"104": {
+			ID: "104", Title: "Onboarding Guide", SpaceID: "1", Status: "current",
+			Version: confluence.PageVersion{Number: 1},
+			Body: confluence.PageBody{Storage: confluence.StorageBody{
+				Representation: "storage",
+				Value:          layoutStartFixtureBody,
+			}},
+		},
+		"105": {
+			ID: "105", Title: "Design Doc", SpaceID: "1", Status: "current",
+			Version: confluence.PageVersion{Number: 1},
+			Body: confluence.PageBody{Storage: confluence.StorageBody{
+				Representation: "storage",
+				Value:          preambleFixtureBody,
+			}},
+		},
+		"106": {
+			ID: "106", Title: "Headless Page", SpaceID: "1", Status: "current",
+			Version: confluence.PageVersion{Number: 1},
+			Body: confluence.PageBody{Storage: confluence.StorageBody{
+				Representation: "storage",
+				Value:          headlessFixtureBody,
 			}},
 		},
 	}
@@ -473,41 +507,141 @@ func TestIntegration_WriteUpdatePage(t *testing.T) {
 	assert.False(t, result.IsError)
 }
 
-// TestIntegration_WriteAppendRenameSection drives the rename end-to-end: the
-// splice, the PUT, and the follow-up read that proves the heading really
-// changed on the stored page rather than only in the response text.
-func TestIntegration_WriteAppendRenameSection(t *testing.T) {
-	cs, cleanup := newIntegrationServer(t)
-	defer cleanup()
-	ctx := context.Background()
+// storageBodyContent strips the "**Page ID:** ... | **Title:** ... |
+// **Version:** ...\n\n" header processPageRaw prepends ahead of a
+// confluence_read(format="storage") response, leaving the raw storage value
+// the page actually holds — needed to test where in the body a fragment
+// landed (e.g. "opens with <ac:layout>"), not merely whether it appears.
+func storageBodyContent(t *testing.T, rendered string) string {
+	t.Helper()
+	idx := strings.Index(rendered, "\n\n")
+	require.GreaterOrEqual(t, idx, 0, "expected a header line followed by a blank line: %s", rendered)
+	return rendered[idx+2:]
+}
 
-	result, err := cs.CallTool(ctx, &mcp.CallToolParams{
-		Name: "confluence_write",
-		Arguments: map[string]any{
-			"action": "append",
-			"items": []any{map[string]any{
+// TestIntegration_WriteAppendPositions drives each append position that
+// writes into the page body end-to-end through the real client and stub
+// server: the splice, the PUT, and a follow-up read that proves the change
+// landed on the stored page rather than only in the response text. One
+// table keyed by position, rather than a near-identical test function per
+// case — replace_section, start, and replace_preamble differ only in which
+// arguments they send and what they check afterwards.
+func TestIntegration_WriteAppendPositions(t *testing.T) {
+	tests := []struct {
+		name   string
+		pageID string
+		item   map[string]any
+		// wantErrSubstr, when set, means the append is expected to fail and
+		// leave the page's stored body untouched; assertSuccess is not called.
+		wantErrSubstr string
+		// assertSuccess inspects the append's success message and the page's
+		// storage body read back afterwards. Nil when wantErrSubstr is set.
+		assertSuccess func(t *testing.T, msg, storedBody string)
+	}{
+		{
+			name:   "replace_section renames the heading",
+			pageID: "101",
+			item: map[string]any{
 				"page_id":     "101",
 				"position":    "replace_section",
 				"heading":     "Backend",
 				"new_heading": "Backend services",
 				"body":        "Now written in Go 1.24.",
-			}},
+			},
+			assertSuccess: func(t *testing.T, msg, storedBody string) {
+				assert.Contains(t, msg, `Renamed heading "Backend" → "Backend services".`)
+				assert.Contains(t, storedBody, "<h2>Backend services</h2>")
+				assert.NotContains(t, storedBody, "<h2>Backend</h2>")
+				assert.Contains(t, storedBody, "Now written in Go 1.24.")
+				assert.Contains(t, storedBody, "<h2>Frontend</h2>", "the following section is untouched")
+			},
 		},
-	})
-	require.NoError(t, err)
-	require.False(t, result.IsError, "append failed: %s", result.Content[0].(*mcp.TextContent).Text)
-	assert.Contains(t, result.Content[0].(*mcp.TextContent).Text, `Renamed heading "Backend" → "Backend services".`)
+		{
+			name:   "start inserts inside the first layout cell",
+			pageID: "104",
+			item: map[string]any{
+				"page_id":  "104",
+				"position": "start",
+				"body":     "Reviewed quarterly.",
+			},
+			assertSuccess: func(t *testing.T, msg, storedBody string) {
+				assert.Contains(t, msg, "Appended to")
+				content := storageBodyContent(t, storedBody)
+				require.True(t, strings.HasPrefix(content, "<ac:layout>"),
+					"body must still open with the layout wrapper: %s", content)
+				assert.Contains(t, content, "<ac:layout-section")
+				const cellOpen = "<ac:layout-cell>"
+				idx := strings.Index(content, cellOpen)
+				require.GreaterOrEqual(t, idx, 0)
+				afterCell := content[idx+len(cellOpen):]
+				assert.True(t, strings.HasPrefix(afterCell, "<p>Reviewed quarterly.</p>"),
+					"fragment must sit immediately after the cell's opening tag, got: %s", afterCell)
+				assert.Contains(t, content, "<h1>Onboarding</h1>", "the existing heading survives")
+			},
+		},
+		{
+			name:   "replace_preamble replaces everything before the first heading",
+			pageID: "105",
+			item: map[string]any{
+				"page_id":  "105",
+				"position": "replace_preamble",
+				"body":     "Revised scope note.",
+			},
+			assertSuccess: func(t *testing.T, msg, storedBody string) {
+				assert.Contains(t, msg, "Appended to")
+				content := storageBodyContent(t, storedBody)
+				assert.Contains(t, content, "Revised scope note.")
+				assert.NotContains(t, content, "Scope note.")
+				assert.Contains(t, content, "<h1>Overview</h1>")
+				wantSuffix := preambleFixtureBody[strings.Index(preambleFixtureBody, "<h1>Overview</h1>"):]
+				assert.True(t, strings.HasSuffix(content, wantSuffix),
+					"section one onward must be byte-identical to before: %s", content)
+			},
+		},
+		{
+			name:   "replace_preamble on a headless page fails without writing",
+			pageID: "106",
+			item: map[string]any{
+				"page_id":  "106",
+				"position": "replace_preamble",
+				"body":     "x",
+			},
+			wantErrSubstr: "no_heading_on_page",
+		},
+	}
 
-	stored, err := cs.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "confluence_read",
-		Arguments: map[string]any{"page_ids": []any{"101"}, "format": "storage"},
-	})
-	require.NoError(t, err)
-	body := stored.Content[0].(*mcp.TextContent).Text
-	assert.Contains(t, body, "<h2>Backend services</h2>")
-	assert.NotContains(t, body, "<h2>Backend</h2>")
-	assert.Contains(t, body, "Now written in Go 1.24.")
-	assert.Contains(t, body, "<h2>Frontend</h2>", "the following section is untouched")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cs, cleanup := newIntegrationServer(t)
+			defer cleanup()
+			ctx := context.Background()
+
+			result, err := cs.CallTool(ctx, &mcp.CallToolParams{
+				Name:      "confluence_write",
+				Arguments: map[string]any{"action": "append", "items": []any{tt.item}},
+			})
+			require.NoError(t, err)
+			msg := result.Content[0].(*mcp.TextContent).Text
+
+			stored, rerr := cs.CallTool(ctx, &mcp.CallToolParams{
+				Name:      "confluence_read",
+				Arguments: map[string]any{"page_ids": []any{tt.pageID}, "format": "storage"},
+			})
+			require.NoError(t, rerr)
+			storedBody := stored.Content[0].(*mcp.TextContent).Text
+
+			if tt.wantErrSubstr != "" {
+				require.True(t, result.IsError, "expected append to fail")
+				assert.Contains(t, msg, tt.wantErrSubstr)
+				assert.Equal(t, headlessFixtureBody, storageBodyContent(t, storedBody),
+					"a rejected replace_preamble must leave the stored page body untouched — no UpdatePage call reached the fake")
+				return
+			}
+
+			require.False(t, result.IsError, "append failed: %s", msg)
+			tt.assertSuccess(t, msg, storedBody)
+		})
+	}
 }
 
 func TestIntegration_WriteDeletePage(t *testing.T) {

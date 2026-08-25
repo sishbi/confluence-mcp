@@ -81,7 +81,6 @@ func parseSections(md string) []section {
 		pos += len(line) + 1 // +1 for newline
 	}
 
-	// Set End offsets: each section ends where the next one starts (or EOF)
 	for i := range sections {
 		if i+1 < len(sections) {
 			sections[i].End = sections[i+1].Start
@@ -136,12 +135,9 @@ type ReadArgs struct {
 	Format        string   `json:"format,omitempty"` // "markdown" (default) or "storage"
 	Limit         int      `json:"limit,omitempty"`
 	NextPageToken string   `json:"next_page_token,omitempty"`
-	// ResolutionStatus filters inline comment threads by resolution state.
-	// Applies to resource: "inline_comments" only. No other field on this
-	// struct carries a jsonschema tag today — added here because the
-	// generated schema otherwise renders this property as a bare "array of
-	// string" with no description and no enum, so an agent has no way to
-	// discover the field or its valid values from the tool schema alone.
+	// ResolutionStatus filters inline comment threads by resolution state
+	// (resource: "inline_comments" only). Carries a jsonschema tag because the
+	// generated schema would otherwise show it as a bare array with no enum.
 	ResolutionStatus []string `json:"resolution_status,omitempty" jsonschema:"Filters inline comment threads by resolution state (resource: \"inline_comments\" only). Valid values: open, resolved, dangling, reopened."`
 }
 
@@ -204,9 +200,8 @@ func pageIDArgNames(args ReadArgs) []string {
 func (h *handlers) handleRead(ctx context.Context, _ *mcp.CallToolRequest, args ReadArgs) (*mcp.CallToolResult, any, error) {
 	resolvedIDs := args.resolvedPageIDs()
 
-	// Section extraction takes priority, from either page-id spelling. This
-	// block is terminal — every branch returns — so no argument combination
-	// can fall through to a mode that would silently ignore section.
+	// Section extraction takes priority. Every branch below returns, so no
+	// argument combination falls through to a mode that would ignore section.
 	if args.Section != "" {
 		if len(resolvedIDs) > 1 {
 			names := append([]string{"section"}, pageIDArgNames(args)...)
@@ -238,22 +233,18 @@ func (h *handlers) handleRead(ctx context.Context, _ *mcp.CallToolRequest, args 
 		return h.readSection(ctx, resolvedIDs[0], args.Section)
 	}
 
-	// Chunk continuation: token alone, no mode that owns its own pagination
-	// cursor (cql/resource already consume next_page_token as
-	// ListOptions.Cursor further down). url is handled separately below — it
-	// has no cursor of its own, so it continues a chunked read instead.
+	// Chunk continuation: token alone. cql/resource own their own pagination
+	// cursor via ListOptions.Cursor further down, so they are excluded here.
 	if args.NextPageToken != "" && args.URL == "" && args.CQL == "" && args.Resource == "" {
 		return h.readNextChunk(ctx, args.NextPageToken, resolvedIDs)
 	}
 
-	// url + token continues a chunked read: readByURL delegates to readByIDs,
-	// which ignores next_page_token, so left unguarded the token is silently
-	// dropped and chunk 1 returned. An agent that reached the page by URL
-	// holds that URL as its handle for the page, and renderChunk's own
-	// continuation hint never tells it to drop url — so the URL's page id is
-	// treated as just another supplied id and checked for agreement with the
-	// token, exactly as page_ids is. A focusedCommentId permalink has no
-	// continuation semantics and is rejected.
+	// url + token also continues a chunked read: readByURL delegates to
+	// readByIDs, which ignores next_page_token, so left unguarded the token
+	// would be silently dropped and chunk 1 returned instead. The URL's page
+	// id is treated as just another supplied id and checked for agreement
+	// with the token, exactly as page_ids is. A focusedCommentId permalink
+	// has no continuation semantics and is rejected.
 	if args.NextPageToken != "" && args.URL != "" && args.CQL == "" && args.Resource == "" {
 		info, err := parseConfluenceURL(args.URL)
 		if err != nil {
@@ -413,11 +404,8 @@ func renderChunk(markdown string, sections []section, pageID string, cursor *chu
 // readNextChunk resumes a chunked page read using a base64url-encoded cursor.
 // The page is served from cache when possible; otherwise it is re-fetched and
 // re-cached transparently. expected carries the page ids the caller supplied
-// alongside the token (resolvedPageIDs() of the request, or nil when none
-// were supplied) — the token already carries its own page id, so a caller
-// that names a different or additional page id gets an explicit error rather
-// than the token's page id being silently substituted or a supplied id being
-// silently dropped.
+// alongside the token — the token already carries its own page id, so a
+// mismatch is an explicit error rather than a silent substitution or drop.
 func (h *handlers) readNextChunk(ctx context.Context, token string, expected []string) (*mcp.CallToolResult, any, error) {
 	cursor, err := decodeChunkToken(token)
 	if err != nil {
@@ -442,7 +430,6 @@ func (h *handlers) readNextChunk(ctx context.Context, token string, expected []s
 		if err != nil {
 			return textResult(fmt.Sprintf("error fetching page %s: %v", cursor.PageID, err), true), nil, nil
 		}
-		// Populate cache.
 		_ = h.processPage(ctx, page)
 		cached, ok = h.cache.get(cursor.PageID)
 		if !ok {
@@ -472,7 +459,6 @@ func (h *handlers) readByURL(ctx context.Context, args ReadArgs) (*mcp.CallToolR
 	}
 
 	if info.commentID == "" {
-		// No comment — delegate to readByIDs.
 		return h.readByIDs(ctx, ReadArgs{PageIDs: []string{info.pageID}, Format: args.Format})
 	}
 
@@ -512,19 +498,10 @@ func (h *handlers) readByURL(ctx context.Context, args ReadArgs) (*mcp.CallToolR
 
 // resolveFocusedComment resolves a focusedCommentId permalink to its ID,
 // kind (footer/inline), and storage-format body. GetFooterComment is
-// footer-only, but a permalink is the most likely way an agent arrives at an
-// inline comment, so a footer 404 falls back to GetInlineComment (D7). The
-// 404 is detected by unwrapping to *confluence.APIError rather than string
-// matching — shouldRetry whitelists only 429/502/503, so a 404 always exits
-// the client's retry loop on attempt 1 as a genuine *APIError{StatusCode:404}.
-// Branches on the error, never on the returned pointer: both client methods
-// return a non-nil comment alongside a non-nil error on failure.
-//
-// When the footer fetch 404s and the inline fetch also fails, the terse
-// "not found" wording is used only if the inline failure is itself a 404.
-// Any other inline failure (e.g. an expired token surfacing as 401, or a
-// 500) is wrapped and surfaced verbatim — reporting "not found" for those
-// would send the caller down the wrong recovery path.
+// footer-only, so a footer 404 falls back to GetInlineComment (D7). The terse
+// "not found" wording is used only when the inline lookup also 404s; any
+// other inline failure is wrapped and surfaced verbatim rather than sending
+// the caller down the wrong recovery path.
 func (h *handlers) resolveFocusedComment(ctx context.Context, commentID string) (id string, kind commentKind, body string, err error) {
 	footerComment, footerErr := h.client.GetFooterComment(ctx, commentID)
 	if footerErr == nil {
@@ -548,10 +525,9 @@ func (h *handlers) resolveFocusedComment(ctx context.Context, commentID string) 
 }
 
 // commentIDLine renders the "**Comment ID:** ...  (type: ...)" line shared by
-// every comment-rendering path (threaded lists and permalink resolution).
-// The type label is load-bearing — it is the comment_type value an agent
-// feeds back to reply_comment (D3) — so this is the only place the line is
-// built, which makes omitting the type impossible to express.
+// every comment-rendering path. The type label is load-bearing — it is the
+// comment_type value fed back to reply_comment (D3) — so this is the only
+// place the line is built.
 func commentIDLine(id string, kind commentKind) string {
 	return fmt.Sprintf("**Comment ID:** %s  (type: %s)", id, kind)
 }
@@ -630,10 +606,9 @@ func (h *handlers) readResource(ctx context.Context, args ReadArgs) (*mcp.CallTo
 	}
 }
 
-// rejectResolutionStatusFor returns an error result when resolution_status is
-// set on a resource other than inline_comments — the only resource whose
-// underlying API accepts the filter. Silently dropping the field would leave
-// the caller believing an unsupported filter was applied.
+// rejectResolutionStatusFor rejects resolution_status on any resource other
+// than inline_comments, the only one whose API accepts the filter — silently
+// dropping it would leave the caller believing it was applied.
 func rejectResolutionStatusFor(args ReadArgs) *mcp.CallToolResult {
 	if len(args.ResolutionStatus) == 0 {
 		return nil
@@ -728,15 +703,11 @@ type commentThreadReply struct {
 }
 
 // renderThread renders one comment thread as a "---"-separated block:
-// extraHeaderLines (resource-specific lines such as **On:**/**Status:**,
-// rendered ahead of the comment ID line), the "**Comment ID:** ...
-// (type: ...)" line built from id/kind, the body, then each reply
-// under its own "**Reply ID:**" line, indented two spaces, and finally an
-// optional per-thread notice (child-fetch failure or reply-cursor
-// truncation). Shared by readComments and readInlineComments so their
-// output shape cannot drift apart. Taking id/kind as their own
-// parameters — rather than folding the "**Comment ID:**" line into
-// extraHeaderLines — makes omitting the type label impossible to express.
+// extraHeaderLines, the "**Comment ID:** ... (type: ...)" line, the body,
+// then each reply. Shared by readComments and readInlineComments so their
+// output shape cannot drift apart. id/kind are taken as their own
+// parameters, rather than folded into extraHeaderLines, so omitting the
+// type label is impossible to express.
 func renderThread(extraHeaderLines []string, id string, kind commentKind, body string, replies []commentThreadReply, notice string) string {
 	var sb strings.Builder
 	sb.WriteString("---\n")
@@ -768,16 +739,12 @@ func renderThread(extraHeaderLines []string, id string, kind commentKind, body s
 	return sb.String()
 }
 
-// threadRenderer holds the resource-specific pieces renderAll needs to turn
-// a list of top-level comments (confluence.Comment or confluence.InlineComment)
-// into "---"-separated thread blocks, single-sourcing the cap/truncation
-// policy shared by readComments and readInlineComments: child-reply fetches
-// stop after maxChildFetchThreads threads (the parent comment still renders;
-// only its replies are left uncollected), and truncationNotice — the
-// resource's already-formatted notice text — is appended verbatim when that
-// happens. idOf/bodyOf/extraHeaderLinesOf adapt the resource-specific
-// comment type for the renderer; fetchChildren is the resource's
-// reply-listing method.
+// threadRenderer adapts a resource-specific comment type (confluence.Comment
+// or confluence.InlineComment) into "---"-separated thread blocks,
+// single-sourcing the cap/truncation policy shared by readComments and
+// readInlineComments: child-reply fetches stop after maxChildFetchThreads
+// threads (the parent comment still renders; only its replies are left
+// uncollected), and truncationNotice is appended verbatim when that happens.
 type threadRenderer[T any] struct {
 	kind               commentKind
 	idOf               func(T) string
@@ -789,13 +756,10 @@ type threadRenderer[T any] struct {
 }
 
 // collectReplies fetches and renders the replies for one parent comment
-// thread, single-sourcing the policies that must not drift between the
-// footer and inline comment resources:
-//   - a child-fetch error never aborts the read (a transient failure on one
-//     thread must not discard every other thread already rendered) — instead
-//     it is surfaced as a per-thread notice with no replies;
-//   - a non-empty next cursor (more than 100 replies) is never silently
-//     dropped — it is surfaced as its own per-thread notice.
+// thread. A child-fetch error never aborts the read — a transient failure on
+// one thread must not discard every other thread already rendered — instead
+// it surfaces as a per-thread notice with no replies. A non-empty next
+// cursor (more than maxRepliesPerThread replies) surfaces as its own notice.
 func (tr threadRenderer[T]) collectReplies(ctx context.Context, commentID string) (replies []commentThreadReply, notice string) {
 	children, cursor, err := tr.fetchChildren(ctx, commentID, &confluence.ListOptions{Limit: maxRepliesPerThread})
 	if err != nil {

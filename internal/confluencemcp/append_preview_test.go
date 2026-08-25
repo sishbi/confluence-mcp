@@ -139,6 +139,167 @@ func TestBuildPreview(t *testing.T) {
 			t.Errorf("DeltaBytes should be negative, got %d", p.Sizes.DeltaBytes)
 		}
 	})
+
+	// The two preamble-editing positions reuse the same parity check every
+	// other mode above pins: buildPreview's Sizes fields must match the sizes
+	// of the SAME res.Merged a real write would send — buildPreview never
+	// recomputes the merged body independently. This is the whole safety
+	// point of the preview: the caller sees the size of the exact bytes that
+	// will be written, not an approximation.
+	t.Run("ModeStart preview sizes match the merged body a real write would send", func(t *testing.T) {
+		base := appendTestLayoutBody
+		fragment := `<p>new</p>`
+		res, err := Splice(base, fragment, SpliceOptions{Mode: ModeStart})
+		if err != nil {
+			t.Fatalf("splice: %v", err)
+		}
+		p := buildPreview(WriteItem{PageID: "42", Body: "new"}, ModeStart, base, res.Merged, fragment, "markdown", res.Boundary)
+		if p.Position != "start" {
+			t.Errorf("Position = %q, want start", p.Position)
+		}
+		if p.Sizes.BaseBodyBytes != len(base) {
+			t.Errorf("BaseBodyBytes = %d, want %d", p.Sizes.BaseBodyBytes, len(base))
+		}
+		if p.Sizes.MergedBodyBytes != len(res.Merged) {
+			t.Errorf("MergedBodyBytes = %d, want %d (the real write's merged body length)", p.Sizes.MergedBodyBytes, len(res.Merged))
+		}
+		if p.Sizes.DeltaBytes != len(res.Merged)-len(base) {
+			t.Errorf("DeltaBytes mismatch: %d", p.Sizes.DeltaBytes)
+		}
+	})
+
+	t.Run("ModeReplacePreamble preview sizes match the merged body a real write would send", func(t *testing.T) {
+		base := `<p>preamble</p><h2>Section A</h2><p>existing</p>`
+		fragment := `<p>new preamble</p>`
+		res, err := Splice(base, fragment, SpliceOptions{Mode: ModeReplacePreamble})
+		if err != nil {
+			t.Fatalf("splice: %v", err)
+		}
+		p := buildPreview(WriteItem{PageID: "42", Body: "new preamble"}, ModeReplacePreamble, base, res.Merged, fragment, "markdown", res.Boundary)
+		if p.Position != "replace_preamble" {
+			t.Errorf("Position = %q, want replace_preamble", p.Position)
+		}
+		if p.Sizes.BaseBodyBytes != len(base) {
+			t.Errorf("BaseBodyBytes = %d, want %d", p.Sizes.BaseBodyBytes, len(base))
+		}
+		if p.Sizes.MergedBodyBytes != len(res.Merged) {
+			t.Errorf("MergedBodyBytes = %d, want %d (the real write's merged body length)", p.Sizes.MergedBodyBytes, len(res.Merged))
+		}
+		if p.Sizes.DeltaBytes != len(res.Merged)-len(base) {
+			t.Errorf("DeltaBytes mismatch: %d", p.Sizes.DeltaBytes)
+		}
+	})
+}
+
+// TestBuildPreview_PreamblePositions covers modeString, summariseAction and
+// contextAround for the two preamble-editing positions.
+func TestBuildPreview_PreamblePositions(t *testing.T) {
+	t.Run("modeString", func(t *testing.T) {
+		if got := modeString(ModeStart); got != "start" {
+			t.Errorf("modeString(ModeStart) = %q, want start", got)
+		}
+		if got := modeString(ModeReplacePreamble); got != "replace_preamble" {
+			t.Errorf("modeString(ModeReplacePreamble) = %q, want replace_preamble", got)
+		}
+	})
+
+	t.Run("summariseAction ModeStart", func(t *testing.T) {
+		got := summariseAction(ModeStart, "", "", BoundaryInfo{})
+		want := "Insert at start of page."
+		if got != want {
+			t.Errorf("summariseAction = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("summariseAction ModeReplacePreamble with no replaced elements", func(t *testing.T) {
+		got := summariseAction(ModeReplacePreamble, "", "", BoundaryInfo{})
+		want := "Replace page preamble."
+		if got != want {
+			t.Errorf("summariseAction = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("summariseAction ModeReplacePreamble names destroyed elements — the safety point of this mode", func(t *testing.T) {
+		b := BoundaryInfo{ReplacedElementSummary: []string{"<p> x 2", `macro "toc" x 1`}}
+		got := summariseAction(ModeReplacePreamble, "", "", b)
+		want := `Replace page preamble (replaces <p> x 2, macro "toc" x 1).`
+		if got != want {
+			t.Errorf("summariseAction = %q, want %q", got, want)
+		}
+	})
+
+	// A bare-text preamble (no element children at all) produces no walker
+	// events, so ReplacedElementSummary is empty even though bytes are about
+	// to be destroyed. Without this fallback the preview reads as if nothing
+	// were being replaced, while appendSuccessMsg's own fallback reports the
+	// byte count after the write — the pre-write preview must say the same.
+	t.Run("summariseAction ModeReplacePreamble falls back to a byte count for a bare-text range", func(t *testing.T) {
+		body := `Some intro text.<h2>Section A</h2><p>content</p>`
+		res, err := spliceReplacePreamble(body, `<p>new</p>`)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		got := summariseAction(ModeReplacePreamble, "", "", res.Boundary)
+		want := `Replace page preamble (replaces 16 bytes with no locatable elements).`
+		if got != want {
+			t.Errorf("summariseAction = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("contextAround ModeStart on a layout body", func(t *testing.T) {
+		base := appendTestLayoutBody
+		before, after := contextAround(base, ModeStart, WriteItem{})
+		if before != "" {
+			t.Errorf("before should be empty for ModeStart, got %q", before)
+		}
+		if strings.HasPrefix(after, "<ac:layout>") {
+			t.Errorf("after should start inside the first cell, not with the <ac:layout> tags: %q", after)
+		}
+		if !strings.HasPrefix(after, "<h2>Section A</h2>") {
+			t.Errorf("after should start with the content inside the first cell: %q", after)
+		}
+	})
+
+	t.Run("contextAround ModeStart with no layout wrapper", func(t *testing.T) {
+		base := `<h2>A</h2><p>existing</p>`
+		before, after := contextAround(base, ModeStart, WriteItem{})
+		if before != "" {
+			t.Errorf("before should be empty for ModeStart, got %q", before)
+		}
+		if !strings.HasPrefix(after, "<h2>A</h2>") {
+			t.Errorf("after should start at byte 0 of the body: %q", after)
+		}
+	})
+
+	t.Run("contextAround ModeReplacePreamble on a layout body", func(t *testing.T) {
+		base := `<ac:layout><ac:layout-section ac:type="fixed-width"><ac:layout-cell><p>preamble</p><h2>Section A</h2><p>existing</p></ac:layout-cell></ac:layout-section></ac:layout>`
+		before, after := contextAround(base, ModeReplacePreamble, WriteItem{})
+		if !strings.HasSuffix(before, "<ac:layout-cell>") {
+			t.Errorf("before should run up to and include the layout opening tags: %q", before)
+		}
+		if !strings.HasPrefix(after, "<h2>Section A</h2>") {
+			t.Errorf("after should start at the first heading: %q", after)
+		}
+	})
+
+	t.Run("contextAround ModeReplacePreamble with no layout wrapper", func(t *testing.T) {
+		base := `<p>preamble</p><h2>Section A</h2><p>existing</p>`
+		before, after := contextAround(base, ModeReplacePreamble, WriteItem{})
+		if before != "" {
+			t.Errorf("before should be empty with no layout wrapper, got %q", before)
+		}
+		if !strings.HasPrefix(after, "<h2>Section A</h2>") {
+			t.Errorf("after should start at the first heading: %q", after)
+		}
+	})
+
+	t.Run("contextAround ModeReplacePreamble on a headless page degrades to empty, never panics", func(t *testing.T) {
+		base := `<p>no heading anywhere</p>`
+		before, after := contextAround(base, ModeReplacePreamble, WriteItem{})
+		if before != "" || after != "" {
+			t.Errorf("before/after should both be empty when there is no heading to bound the preamble, got (%q, %q)", before, after)
+		}
+	})
 }
 
 func replaceStr(pattern, v string) string {

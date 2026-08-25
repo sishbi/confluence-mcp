@@ -121,11 +121,9 @@ func (c *Client) retry(ctx context.Context, fn func() (*http.Response, error)) (
 		if !shouldRetry(resp.StatusCode) {
 			return resp, nil
 		}
-		// Drain and close the body before retrying.
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 
-		// Don't sleep after the last attempt.
 		if attempt < maxAttempts-1 {
 			delay := c.backoff(attempt, resp)
 			c.log.WarnContext(ctx, "retry",
@@ -307,10 +305,8 @@ func (c *Client) GetPage(ctx context.Context, id string) (*Page, error) {
 // GetPageChildren returns the child pages of a page.
 // Returns (children, nextCursor, error).
 //
-// Known follow-up: nextCursor is the raw relative "_links.next" URL, not the
-// extracted cursor token (see extractCursor). Out of scope for the comment
-// threading feature that introduced extractCursor; migrate this alongside
-// GetPageLabels in a follow-up.
+// Known follow-up: unlike other List* methods, nextCursor here is the raw
+// relative "_links.next" URL, not the extracted cursor token (see extractCursor).
 func (c *Client) GetPageChildren(ctx context.Context, id string, opts *ListOptions) ([]Page, string, error) {
 	path := fmt.Sprintf("/wiki/api/v2/pages/%s/children", id) + buildQuery(opts)
 	var result PaginatedResponse[Page]
@@ -420,12 +416,9 @@ func (c *Client) GetInlineComment(ctx context.Context, commentID string) (*Inlin
 }
 
 // createComment POSTs a new footer or inline comment to endpoint. The
-// payload carries exactly one identity key (identKey/identValue) alongside
-// the storage-format body — "pageId" for a top-level comment, or
-// "parentCommentId" for a reply. Confluence rejects a payload that carries
-// both pageId and parentCommentId; since only one key can ever be set here,
-// that is enforced by construction. Each caller below picks the key that
-// applies to it.
+// payload carries exactly one identity key (identKey/identValue) — "pageId"
+// for a top-level comment, "parentCommentId" for a reply — since Confluence
+// rejects a payload carrying both.
 func (c *Client) createComment(ctx context.Context, endpoint, identKey, identValue, storageBody string, out any) error {
 	payload := map[string]any{
 		identKey: identValue,
@@ -491,10 +484,8 @@ func (c *Client) UpdateComment(ctx context.Context, commentID string, storageBod
 // GetPageLabels returns the labels for a page.
 // Returns (labels, nextCursor, error).
 //
-// Known follow-up: nextCursor is the raw relative "_links.next" URL, not the
-// extracted cursor token (see extractCursor). Out of scope for the comment
-// threading feature that introduced extractCursor; migrate this alongside
-// GetPageChildren in a follow-up.
+// Known follow-up: unlike other List* methods, nextCursor here is the raw
+// relative "_links.next" URL, not the extracted cursor token (see extractCursor).
 func (c *Client) GetPageLabels(ctx context.Context, pageID string, opts *ListOptions) ([]Label, string, error) {
 	path := fmt.Sprintf("/wiki/api/v2/pages/%s/labels", pageID) + buildQuery(opts)
 	var result PaginatedResponse[Label]
@@ -523,13 +514,11 @@ func (c *Client) AddPageLabel(ctx context.Context, pageID string, label string) 
 	if err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/wiki/rest/api/content/%s/label", pageID), body, &result); err != nil {
 		return nil, err
 	}
-	// Find the label we just added
 	for _, l := range result.Results {
 		if l.Name == label {
 			return &l, nil
 		}
 	}
-	// Return first result if exact match not found
 	if len(result.Results) > 0 {
 		return &result.Results[0], nil
 	}

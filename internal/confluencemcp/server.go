@@ -32,7 +32,20 @@ var writeTool = &mcp.Tool{
 Actions:
 - create: Create pages. Each item needs: space_id, title. Optional: body (Markdown), parent_id, status (current/draft), page_id (source page whose macro registry to reuse when body carries <!-- macro:mN --> sentinels).
 - update: Update pages. Each item needs: page_id, title, version_number. Optional: body (Markdown), status. Replaces the full body.
-- append: Insert or replace a fragment in an existing page WITHOUT sending the full body. The server fetches the current storage, splices the fragment in place, and writes the merged result — the agent only sends the small fragment. For typical edits this is ~100× smaller than update and measurably faster. Each item needs: page_id, body (Markdown by default; storage if format="storage"). Optional: position (one of "end" (default), "after_heading", "end_of_section", "replace_section"), heading (required for after_heading / end_of_section / replace_section; exact, case-sensitive match), version_number (optional optimistic concurrency), include_subsections (replace_section only), new_heading (replace_section only). after_heading inserts at the TOP of the section, above its existing content; end_of_section inserts at the BOTTOM, after its existing content and before the next same-or-higher heading. Adding a new sibling section? Use end_of_section — after_heading would displace the target section's existing body into the new one. replace_section keeps the target heading and strips a matching leading heading from your fragment; end_of_section keeps yours, so a fragment starting with a heading creates a new section. replace_section stops at the next heading of ANY level, so a section's subsections survive a replace and your fragment need not repeat them; pass include_subsections=true to replace the whole section, subsections included. Both the dry-run preview and the success response name the nested subsections replaced or preserved. new_heading renames the target heading (plain text, level unchanged) while replacing its content — the only way to change a heading without rewriting the page; it is rejected if the new text already names another heading on the page, or if the heading contains a mention, macro, or emoticon (inline formatting such as bold or code is fine — it is replaced along with the words). Renaming breaks every link anchored to the old heading text: the response names the ones it can see on the page, but not those on other pages. Dry-run returns a structured preview including the storage fragment, boundary info, and size delta. On success the response reports fragment bytes and base→merged body bytes.
+- append: Insert or replace a fragment in an existing page WITHOUT sending the full body — the server splices it into the current storage and writes the merged result. ~100× smaller than update for typical edits.
+  Required: page_id, body (Markdown by default; storage if format="storage"). Optional: position (default "end"), version_number (optimistic concurrency), heading, include_subsections, new_heading.
+  heading is required for after_heading / end_of_section / replace_section (exact, case-sensitive) and REJECTED for every other position, including "end".
+  Heading-scoped positions:
+    after_heading — insert at the TOP of the section, above its existing content.
+    end_of_section — insert at the BOTTOM, before the next same-or-higher heading. Use this for a new sibling section; after_heading would displace the target's body into it. A leading heading in your fragment is kept, creating that new section.
+    replace_section — replace the section's content up to the next heading of ANY level, so subsections survive and your fragment need not repeat them; include_subsections=true (valid only here) replaces them too. Keeps the target heading and strips a matching leading heading from your fragment. Preview and response name the subsections replaced or preserved.
+    new_heading (replace_section only) — rename the target heading in place (plain text, level unchanged) while replacing its content. Rejected if the new text already names another heading on the page, or if the heading holds a mention, macro, or emoticon (bold/code is fine, and is replaced along with the words). Breaks links anchored to the old text; the response names the on-page ones, but cannot see other pages.
+  Structure-scoped positions — both REJECT heading, include_subsections, and new_heading:
+    start — insert at the page start, or just past the FIRST layout-cell's opening tag on a layout-wrapped page. Works on a page with no headings.
+    replace_preamble — replace everything before the first heading; the heading and all that follows are untouched. Unlike replace_section, a leading heading in your fragment is NOT stripped.
+  start and end are deliberately asymmetric: end writes into the LAST layout-cell, start into the FIRST — on a two-column page, the right cell and the left cell respectively.
+  Failures, all of which mean "use action update instead": no_heading_on_page — the container (the first layout-cell on a layout-wrapped page, else the whole page) has no locatable heading, which is not the same as the page having none; section_boundary_unbalanced / preamble_boundary_unbalanced — a plain wrapper element opens inside the range and closes outside it, so replacing would orphan its closing tag.
+  Dry-run returns a preview with the storage fragment, boundary info, and size delta; on success the response reports fragment bytes and base→merged body bytes, naming what it replaced.
 - delete: Delete pages. Each item needs: page_id.
 - comment: Add footer comments. Each item needs: page_id, body (Markdown).
 - edit_comment: Edit comments. Each item needs: comment_id, body (Markdown), version_number.
@@ -89,7 +102,6 @@ func toolCallLoggingMiddleware(logger *slog.Logger) mcp.Middleware {
 				return next(ctx, method, req)
 			}
 
-			// Extract tool name from the request params.
 			var toolName string
 			var args json.RawMessage
 			if p, ok := req.GetParams().(*mcp.CallToolParamsRaw); ok {
@@ -118,14 +130,12 @@ func toolCallLoggingMiddleware(logger *slog.Logger) mcp.Middleware {
 				return result, err
 			}
 
-			// Log result summary.
 			attrs := []any{
 				"tool", toolName,
 				"duration", duration,
 			}
 			if ctr, ok := result.(*mcp.CallToolResult); ok {
 				attrs = append(attrs, "is_error", ctr.IsError)
-				// Sum content text length for size indication.
 				totalLen := 0
 				for _, c := range ctr.Content {
 					if tc, ok := c.(*mcp.TextContent); ok {

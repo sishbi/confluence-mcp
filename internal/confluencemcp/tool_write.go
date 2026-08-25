@@ -28,10 +28,9 @@ type WriteItem struct {
 	CommentID     string `json:"comment_id,omitempty"`
 	Label         string `json:"label,omitempty"`
 	// Append-specific. Position is one of "end" (default), "after_heading",
-	// "end_of_section", "replace_section". after_heading inserts at the TOP of
-	// the section (above its existing content); end_of_section inserts at the
-	// BOTTOM (after its existing content, before the next heading). Heading is
-	// required for every position except "end".
+	// "end_of_section", "replace_section", "start", "replace_preamble".
+	// Heading is required for after_heading, end_of_section, and
+	// replace_section, and REJECTED for every other position.
 	Position string `json:"position,omitempty"`
 	Heading  string `json:"heading,omitempty"`
 	// IncludeSubsections applies to position "replace_section" only. By default
@@ -61,11 +60,9 @@ type WriteArgs struct {
 
 // writeActionNames lists every write action, in the order presented to
 // callers: the tool description prose (server.go) and the unknown-action
-// error message below. validActions is derived from this slice, so the
-// action list, validActions, and the error string cannot drift from one
-// another; TestValidActionsMatchesPermittedWriteFields (tool_write_test.go)
-// closes the remaining leg by pinning validActions against
-// permittedWriteFields.
+// error message below. validActions is derived from this slice so the two
+// cannot drift; TestValidActionsMatchesPermittedWriteFields
+// (tool_write_test.go) pins validActions against permittedWriteFields.
 var writeActionNames = []string{
 	"create", "update", "append", "delete", "comment", "edit_comment", "reply_comment", "add_label", "remove_label",
 }
@@ -176,11 +173,8 @@ var writeFields = []writeFieldSpec{
 
 // permittedWriteFields maps each action to the WriteItem fields its handler
 // method actually reads (D6). One struct backs every action and the tool
-// schema is reflected from it, so every field is accepted by every action
-// unless rejected here — that silent acceptance is what let comment_type be
-// dropped on a plain "comment" call in the original mis-post. Each set below
-// was derived by reading the corresponding handler, not copied from another
-// action's set.
+// schema is reflected from it, so a field supplied to an action that does
+// not consume it would otherwise be silently accepted and dropped.
 var permittedWriteFields = map[string]map[string]bool{
 	"create":        writeFieldSet("space_id", "title", "body", "format", "parent_id", "status", "page_id"),
 	"update":        writeFieldSet("page_id", "title", "body", "format", "version_number", "status"),
@@ -202,30 +196,26 @@ func writeFieldSet(names ...string) map[string]bool {
 }
 
 // writeFieldHints names, for a rejected field, the field an agent probably
-// meant instead. parent_id (create's field) and parent_comment_id (reply's)
-// are the confusable pair that caused a real mis-post — comment_type was
-// dropped silently instead of erroring.
+// meant instead — e.g. parent_id (create's field) vs parent_comment_id
+// (reply's), a confusable pair.
 var writeFieldHints = map[string]string{
 	"parent_id": "parent_comment_id",
 }
 
 // writeFieldExplanations overrides the generic rejection message for a
 // specific (action, field) pair, keyed "action:field". Use this only when the
-// generic message would be misleading because the field IS a real schema
-// field valid on other actions — "not a valid field" reads as "no such
-// field", which is false for e.g. format on comment (it works on create,
-// update, append, reply_comment). Every other rejection stays generic.
+// generic "not a valid field" message would be misleading because the field
+// IS valid on other actions (e.g. format, which works on create, update,
+// append, reply_comment).
 var writeFieldExplanations = map[string]string{
 	"comment:format":      `format is not supported for action "comment" — comment bodies are always converted from Markdown; raw XHTML in comments is not yet supported`,
 	"edit_comment:format": `format is not supported for action "edit_comment" — comment bodies are always converted from Markdown; raw XHTML in comments is not yet supported`,
 }
 
 // validateWriteItemFields rejects any field an item supplies that its
-// action's handler does not consume. Symmetric by construction: a field is
-// rejected the same way whether it is "one the action never uses" (e.g.
-// comment_type on comment) or "the wrong one of a confusable pair" (e.g.
-// parent_id on reply_comment) — both are the silent-drop defect D6 exists to
-// close, so both are hard errors rather than one being quietly ignored.
+// action's handler does not consume — whether the field is one the action
+// never uses (e.g. comment_type on comment) or the wrong one of a confusable
+// pair (e.g. parent_id on reply_comment); both are hard errors (D6).
 func validateWriteItemFields(action string, item WriteItem) error {
 	permitted := permittedWriteFields[action]
 	for _, f := range writeFields {
@@ -395,11 +385,8 @@ func (h *handlers) writeEditComment(ctx context.Context, item WriteItem, dryRun 
 // writeReplyComment handles the "reply_comment" action: post a reply to an
 // existing footer or inline comment (D1 — replies only, no new anchored
 // inline comments). Body handling is deliberately local rather than shared
-// with writeComment/writeEditComment: those two ignore item.Format and
-// always call mdconv.ToStorageFormat, and folding reply_comment in would
-// also drag in ensureMacroRegistry(ctx, item.PageID) — a reply sends no
-// page_id at all (D4), so that lookup would fire a lookup against an empty
-// page ID for no benefit.
+// with writeComment/writeEditComment, since a reply sends no page_id at all
+// (D4) and those two rely on item.PageID for macro-registry lookups.
 func (h *handlers) writeReplyComment(ctx context.Context, item WriteItem, dryRun bool) (string, error) {
 	if item.ParentCommentID == "" {
 		return "", fmt.Errorf("parent_comment_id is required for reply_comment")

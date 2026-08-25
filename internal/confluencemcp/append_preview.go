@@ -42,10 +42,8 @@ type PreviewSizes struct {
 }
 
 // buildPreview builds an AppendPreview for a dry-run result. The write item is
-// passed whole rather than field by field: the splice options it carries
-// (heading, new heading, include_subsections) all have to reach the context and
-// summary helpers, and threading them positionally invites a swap between the
-// two adjacent heading strings.
+// passed whole rather than field by field, since threading heading and
+// new_heading positionally invites a swap between the two adjacent strings.
 func buildPreview(
 	item WriteItem,
 	mode Mode,
@@ -91,6 +89,10 @@ func modeString(m Mode) string {
 		return "replace_section"
 	case ModeEndOfSection:
 		return "end_of_section"
+	case ModeStart:
+		return "start"
+	case ModeReplacePreamble:
+		return "replace_preamble"
 	default:
 		return "unknown"
 	}
@@ -107,31 +109,48 @@ func summariseAction(mode Mode, heading, newHeading string, b BoundaryInfo) stri
 		if newHeading != "" {
 			summary += fmt.Sprintf(" and rename it to %q", newHeading)
 		}
-		var parts []string
-		if len(b.ReplacedElementSummary) > 0 {
-			parts = append(parts, "replaces "+strings.Join(b.ReplacedElementSummary, ", "))
-		}
-		// Nested subsections are named, never folded into the tag histogram —
-		// losing (or keeping) a whole subsection is the one outcome the caller
-		// must not have to infer from a byte delta.
-		if len(b.ReplacedSections) > 0 {
-			parts = append(parts, "replaces "+nestedSectionPhrase(b.ReplacedSections))
-		}
-		if len(b.PreservedSections) > 0 {
-			parts = append(parts, "preserves "+nestedSectionPhrase(b.PreservedSections))
-		}
-		if len(b.AnchorReferences) > 0 {
-			parts = append(parts, fmt.Sprintf("breaks %d on-page anchor reference(s)", len(b.AnchorReferences)))
-		}
-		if len(parts) > 0 {
-			summary += " (" + strings.Join(parts, "; ") + ")"
-		}
-		return summary + "."
+		return summary + replacedElementsClause(b) + "."
 	case ModeEndOfSection:
 		return fmt.Sprintf("Append to end of section %q.", heading)
+	case ModeStart:
+		return "Insert at start of page."
+	case ModeReplacePreamble:
+		return "Replace page preamble" + replacedElementsClause(b) + "."
 	default:
 		return ""
 	}
+}
+
+// replacedElementsClause renders the "(replaces …; preserves …)" parenthetical
+// shared by ModeReplaceSection and ModeReplacePreamble, both of which destroy
+// a region of the page and must tell the caller what is in it before the PUT.
+// Returns "" when there is nothing to report.
+func replacedElementsClause(b BoundaryInfo) string {
+	var parts []string
+	switch {
+	case len(b.ReplacedElementSummary) > 0:
+		parts = append(parts, "replaces "+strings.Join(b.ReplacedElementSummary, ", "))
+	case b.ReplacedByteCount > 0:
+		// A bare-text replaced range produces no walker events, so
+		// ReplacedElementSummary is empty even though bytes are about to be
+		// destroyed. Name the byte count instead of going silent.
+		parts = append(parts, fmt.Sprintf("replaces %d bytes with no locatable elements", b.ReplacedByteCount))
+	}
+	// Nested subsections are named, never folded into the tag histogram —
+	// the caller must not have to infer them from a byte delta.
+	if len(b.ReplacedSections) > 0 {
+		parts = append(parts, "replaces "+nestedSectionPhrase(b.ReplacedSections))
+	}
+	if len(b.PreservedSections) > 0 {
+		parts = append(parts, "preserves "+nestedSectionPhrase(b.PreservedSections))
+	}
+	if len(b.AnchorReferences) > 0 {
+		parts = append(parts, fmt.Sprintf("breaks %d on-page anchor reference(s)", len(b.AnchorReferences)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, "; ") + ")"
 }
 
 // nestedSectionPhrase renders a list of nested subsection headings as
@@ -149,13 +168,11 @@ func nestedSectionPhrase(names []string) string {
 }
 
 // contextAround returns a snippet of base-body context before and after the
-// splice point. Kept small (≤ maxContextChars each side) to bound the preview
-// size. ModeReplaceSection and ModeEndOfSection both stop at a section
-// boundary via findSectionExtent, but keep separate cases: their "before"
-// differs — replace excludes the section body (it is being replaced),
-// end-of-section includes it (it is being kept). item.IncludeSubsections
-// applies to replace only, and must match the splice's own extent so the
-// "after" snippet starts where the replacement really ends.
+// splice point, kept small (≤ maxContextChars each side) to bound the
+// preview size. ModeReplaceSection and ModeEndOfSection both stop at a
+// section boundary via findSectionExtent, but their "before" differs:
+// replace excludes the section body (it is being replaced), end-of-section
+// includes it (it is being kept).
 func contextAround(base string, mode Mode, item WriteItem) (string, string) {
 	const maxContextChars = 400
 	heading := item.Heading
@@ -176,7 +193,7 @@ func contextAround(base string, mode Mode, item WriteItem) (string, string) {
 	switch mode {
 	case ModeEnd:
 		// Splice goes before the innermost trailing </ac:layout-cell>, or end
-		// of body if no layout. Simple: show the tail of base.
+		// of body if no layout.
 		return truncBefore(base), ""
 	case ModeAfterHeading:
 		match, err := locateHeading(base, heading)
@@ -186,12 +203,9 @@ func contextAround(base string, mode Mode, item WriteItem) (string, string) {
 		return truncBefore(base[:match.headingEndOff]), truncAfter(base[match.headingEndOff:])
 	case ModeReplaceSection:
 		// "Before" ends at the heading itself — everything after it is being
-		// replaced, so none of the section's existing body appears. With a
-		// rename the heading is shown as it WILL be, not as it was: the preview
-		// has to show the page the write produces, and the heading is now part
-		// of the change. If the section's stop point can't be found, fall back
-		// to the heading-only view: there is nothing "after" to show for a
-		// replace regardless.
+		// replaced. With a rename the heading is shown as it WILL be, since
+		// the preview has to show the page the write produces. Falls back to
+		// the heading-only view if the section's stop point can't be found.
 		match, err := locateHeading(base, heading)
 		if err != nil {
 			return "", ""
@@ -205,10 +219,8 @@ func contextAround(base string, mode Mode, item WriteItem) (string, string) {
 	case ModeEndOfSection:
 		// "Before" runs all the way to the section's stop point, including
 		// the section's existing body — that's what distinguishes this from
-		// after_heading. If the stop point can't be found, fall back to no
-		// context at all rather than ModeReplaceSection's heading-only view:
-		// showing just the heading here would look like a top-of-section
-		// insert, which is precisely the confusion this mode exists to avoid.
+		// after_heading. Falls back to no context (not ReplaceSection's
+		// heading-only view) so it can't be mistaken for a top-of-section insert.
 		match, err := locateHeading(base, heading)
 		if err != nil {
 			return "", ""
@@ -218,6 +230,23 @@ func contextAround(base string, mode Mode, item WriteItem) (string, string) {
 			return "", ""
 		}
 		return truncBefore(base[:ext.stop]), truncAfter(base[ext.stop:])
+	case ModeStart:
+		// "After" is the head of the container: byte 0 of the body, or just
+		// past the opening <ac:layout-cell> tag.
+		container, err := locateContainer(base)
+		if err != nil {
+			return "", ""
+		}
+		return "", truncAfter(base[container.start:])
+	case ModeReplacePreamble:
+		// "Before" includes the container's own opening tags, since those are
+		// not part of the replaced range. "After" begins at the first
+		// heading, which bounds the preamble and is never touched.
+		ext, err := locatePreambleExtent(base)
+		if err != nil {
+			return "", ""
+		}
+		return truncBefore(base[:ext.containerStart]), truncAfter(base[ext.firstHeadingStart:])
 	default:
 		return "", ""
 	}

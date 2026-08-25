@@ -40,10 +40,9 @@ func validateRename(body string, match headingMatch, heading, newHeading string)
 	}
 
 	// A heading holding a mention, macro, or emoticon cannot be renamed from
-	// plain text without destroying it — and the caller, reading Markdown,
-	// never saw it as markup. Refuse rather than silently drop it. Inline
-	// formatting is not in this set: it is presentation the caller did see, and
-	// a rename replaces it along with the words.
+	// plain text without destroying it, and the caller never saw it as markup.
+	// Inline formatting is not in this set: it is presentation the caller did
+	// see, and a rename replaces it along with the words.
 	if children := headingConfluenceChildren(body, match); len(children) > 0 {
 		return fmt.Errorf(
 			"%w: heading %q contains %s — renaming it would destroy them; edit the section with action \"update\" instead",
@@ -90,21 +89,25 @@ func spliceReplaceSection(body, fragment string, opts SpliceOptions) (SpliceResu
 		return SpliceResult{}, err
 	}
 
-	// Callers frequently emit a fragment that begins with the section heading
-	// (e.g. "## Data scrubbing\n\n..."), which would produce a duplicated
-	// heading after the splice since the target heading is preserved. Strip a
-	// leading heading whose text matches the target so the fragment body-only
-	// convention is forgiving. A rename accepts either name: an agent renaming
-	// a section naturally puts the NEW heading at the top of its fragment.
+	// Fragments often repeat the section heading (e.g. an agent sends
+	// "## Data scrubbing\n\n..."), which would duplicate it since the target
+	// heading is preserved. Strip a leading heading matching the target or,
+	// for a rename, the new heading, since an agent renaming a section
+	// naturally puts the new name at the top of its fragment.
 	fragment = stripLeadingHeading(fragment, heading, opts.NewHeading)
 
-	// The replaced region starts at match.headingEndOff (just after </hN>) and
-	// extends up to the stop offset. findSectionExtent also collects top-level
-	// element names seen between the heading end and the stop, for the
-	// replaced-element summary, plus the section's nested subsection headings.
+	// The replaced region is [match.headingEndOff, ext.stop); findSectionExtent
+	// also returns the summary of removed elements and nested subsections.
 	ext, err := findSectionExtent(body, match, opts.IncludeSubsections)
 	if err != nil {
 		return SpliceResult{}, err
+	}
+	if ext.unbalanced {
+		return SpliceResult{}, fmt.Errorf(
+			"%w: a sibling element in this section opens before the replaced range ends but does not close before it — "+
+				"replacing it would delete that element's opening tag and orphan its closing tag; use action \"update\" instead",
+			ErrSectionBoundaryUnbalanced,
+		)
 	}
 
 	replacedByteCount := ext.stop - match.headingEndOff
@@ -121,9 +124,9 @@ func spliceReplaceSection(body, fragment string, opts SpliceOptions) (SpliceResu
 		ReplacedByteCount:      replacedByteCount,
 		ReplacedElementSummary: summariseTags(ext.replacedTags),
 	}
-	// A rename is reported the same way, and for the same reason: the caller
-	// must not have to infer it from the byte delta. The broken anchor
-	// references go with it — they are the rename's collateral damage.
+	// A rename is reported explicitly so the caller isn't left inferring it
+	// from the byte delta; the broken anchor references are its collateral
+	// damage, reported alongside it.
 	if opts.NewHeading != "" {
 		boundary.HeadingRenamed = &HeadingRename{From: heading, To: opts.NewHeading}
 		boundary.AnchorReferences = findAnchorReferences(body, heading)
@@ -172,24 +175,46 @@ func stripLeadingHeading(fragment string, targets ...string) string {
 	return fragment
 }
 
-// summariseTags turns a document-order list of element local names into a
-// histogram like ["<p> x 2", "<ul> x 1"]. The order is document-order first
-// appearance.
-func summariseTags(tags []string) []string {
-	if len(tags) == 0 {
+// summariseTags turns a document-order list of replaced elements into a
+// histogram like ["<p> x 2", "macro \"toc\" x 1"]. The order is document-order
+// first appearance.
+//
+// A named structured-macro is keyed and displayed by its ac:name rather than
+// its tag name, so two macros with different names never collapse into one
+// misleading "structured-macro x 2" entry — the caller needs to know which
+// macros are about to be destroyed, not just how many. An unnamed macro falls
+// back to its tag name for both the key and the display.
+func summariseTags(elements []replacedElement) []string {
+	if len(elements) == 0 {
 		return nil
 	}
-	counts := make(map[string]int, len(tags))
-	order := make([]string, 0, len(tags))
-	for _, t := range tags {
-		if _, ok := counts[t]; !ok {
-			order = append(order, t)
+	type entry struct {
+		display string
+		count   int
+	}
+	counts := make(map[string]*entry, len(elements))
+	order := make([]string, 0, len(elements))
+	for _, e := range elements {
+		key := e.name
+		display := fmt.Sprintf("<%s>", e.name)
+		if e.name == "structured-macro" {
+			if e.macroName != "" {
+				key = "macro:" + e.macroName
+				display = fmt.Sprintf("macro %q", e.macroName)
+			} else {
+				display = "<ac:structured-macro>"
+			}
 		}
-		counts[t]++
+		if _, ok := counts[key]; !ok {
+			counts[key] = &entry{display: display}
+			order = append(order, key)
+		}
+		counts[key].count++
 	}
 	out := make([]string, 0, len(order))
-	for _, t := range order {
-		out = append(out, fmt.Sprintf("<%s> x %d", t, counts[t]))
+	for _, key := range order {
+		e := counts[key]
+		out = append(out, fmt.Sprintf("%s x %d", e.display, e.count))
 	}
 	return out
 }

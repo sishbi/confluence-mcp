@@ -25,18 +25,25 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 	if err != nil {
 		return "", err
 	}
-	// Every position except "end" operates on a named heading. Expressed as a
-	// negation so a mode added later requires one by default.
-	if mode != ModeEnd && item.Heading == "" {
-		return "", fmt.Errorf("heading is required for position %q", item.Position)
+	// Every position declares, via positionFieldRules, whether it requires a
+	// heading and whether it permits include_subsections / new_heading. A field
+	// supplied to a position that does not consume it is a hard error in both
+	// directions, rather than being silently dropped.
+	rules, ok := positionFieldRules[mode]
+	if !ok {
+		return "", fmt.Errorf("internal error: no field rules registered for position %q", positionLabel(item.Position))
 	}
-	// Both of these only mean anything on a replace. Silently ignoring either on
-	// the other positions would let a caller believe a destructive option was
-	// honoured when it was dropped.
-	if item.IncludeSubsections && mode != ModeReplaceSection {
+	label := positionLabel(item.Position)
+	switch {
+	case rules.headingRequired && item.Heading == "":
+		return "", fmt.Errorf("heading is required for position %q", label)
+	case !rules.headingRequired && item.Heading != "":
+		return "", fmt.Errorf("heading is not valid for position %q", label)
+	}
+	if item.IncludeSubsections && !rules.includeSubsectionsAllowed {
 		return "", fmt.Errorf(`include_subsections is only valid for position "replace_section"`)
 	}
-	if item.NewHeading != "" && mode != ModeReplaceSection {
+	if item.NewHeading != "" && !rules.newHeadingAllowed {
 		return "", fmt.Errorf(`new_heading is only valid for position "replace_section"`)
 	}
 
@@ -50,7 +57,6 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 		fragmentStorage = mdconv.ToStorageFormat(item.Body)
 	}
 
-	// Fetch, splice, and for dry-run return the preview.
 	page, res, err := h.fetchAndSplice(ctx, item, mode, fragmentStorage)
 	if err != nil {
 		return "", err
@@ -85,10 +91,9 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 		return appendSuccessMsg(updated.Title, updated.ID, page.Body.Storage.Value, res.Merged, fragmentStorage, res.Boundary), nil
 	}
 
-	// Retry once on 409 when the caller did not pin a version. Confluence's
-	// read path is eventually consistent — the GET above can return a stale
-	// version right after a prior write. Re-fetch, re-splice against the fresh
-	// body, and PUT again with the new version.
+	// Retry once on 409 when the caller did not pin a version: Confluence's
+	// read path is eventually consistent, so the GET above can return a stale
+	// version right after a prior write.
 	if item.VersionNumber == 0 && is409(err) {
 		h.logger().WarnContext(ctx, "append_retry_on_409", "page_id", item.PageID)
 		page2, res2, ferr := h.fetchAndSplice(ctx, item, mode, fragmentStorage)
@@ -107,16 +112,29 @@ func (h *handlers) writeAppend(ctx context.Context, item WriteItem, dryRun bool)
 
 // appendSuccessMsg formats the append success line, including the fragment
 // size and base→merged body sizes so the caller can see what was sent versus
-// what the server assembled. A replace also names the nested subsections it
-// removed or kept: the byte delta alone once let a subsection deletion go
-// unnoticed.
+// what the server assembled. A replace_preamble or replace_section write also
+// names what it destroyed, and a replace names the nested subsections it
+// removed or kept, rather than leaving the byte delta as the only clue.
 func appendSuccessMsg(title, id, baseBody, mergedBody, fragment string, b BoundaryInfo) string {
 	base := len(baseBody)
 	merged := len(mergedBody)
+	// Only the element histogram is folded into the opening sentence — nested
+	// sections and broken anchors get their own dedicated sentences below,
+	// which name them rather than counting them.
+	var replaced string
+	if len(b.ReplacedElementSummary) > 0 {
+		replaced = " (replaces " + strings.Join(b.ReplacedElementSummary, ", ") + ")"
+	}
 	msg := fmt.Sprintf(
-		"Appended to page %q (ID: %s). Fragment sent: %d bytes; page body: %d → %d (Δ%+d).",
-		title, id, len(fragment), base, merged, merged-base,
+		"Appended to page %q (ID: %s). Fragment sent: %d bytes; page body: %d → %d (Δ%+d)%s.",
+		title, id, len(fragment), base, merged, merged-base, replaced,
 	)
+	// A bare-text replaced range produces no walker events, so
+	// ReplacedElementSummary is empty even though bytes were destroyed. Name
+	// the byte count instead of going silent.
+	if len(b.ReplacedElementSummary) == 0 && b.ReplacedByteCount > 0 {
+		msg += fmt.Sprintf(" Replaced %d bytes with no locatable elements (e.g. bare text).", b.ReplacedByteCount)
+	}
 	if len(b.ReplacedSections) > 0 {
 		msg += fmt.Sprintf(" Replaced %s.", nestedSectionPhrase(b.ReplacedSections))
 	}
@@ -193,6 +211,14 @@ func is409(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
 }
 
+// positionStrings lists every position string parseMode accepts, other than
+// the empty string (a shorthand for "end", not a label of its own). Single
+// source of truth for the "unknown position" error message below and the
+// test coverage tables in tool_write_append_test.go.
+var positionStrings = []string{
+	"end", "after_heading", "end_of_section", "replace_section", "start", "replace_preamble",
+}
+
 // parseMode converts the user-facing position string to a Mode.
 func parseMode(position string) (Mode, error) {
 	switch position {
@@ -204,8 +230,46 @@ func parseMode(position string) (Mode, error) {
 		return ModeEndOfSection, nil
 	case "replace_section":
 		return ModeReplaceSection, nil
+	case "start":
+		return ModeStart, nil
+	case "replace_preamble":
+		return ModeReplacePreamble, nil
 	default:
-		return 0, fmt.Errorf("unknown position %q — use: end, after_heading, end_of_section, replace_section", position)
+		return 0, fmt.Errorf(
+			"unknown position %q — use: %s",
+			position, strings.Join(positionStrings, ", "),
+		)
 	}
+}
+
+// positionFields declares which optional WriteItem fields a position
+// consumes: whether a heading is required (every other position REJECTS one
+// outright), and whether include_subsections / new_heading are permitted at
+// all. positionFieldRules must carry one entry per Mode — a mode missing
+// from the table fails the writeAppend lookup loudly rather than silently
+// applying a default.
+type positionFields struct {
+	headingRequired           bool
+	includeSubsectionsAllowed bool
+	newHeadingAllowed         bool
+}
+
+var positionFieldRules = map[Mode]positionFields{
+	ModeEnd:             {},
+	ModeAfterHeading:    {headingRequired: true},
+	ModeEndOfSection:    {headingRequired: true},
+	ModeReplaceSection:  {headingRequired: true, includeSubsectionsAllowed: true, newHeadingAllowed: true},
+	ModeStart:           {},
+	ModeReplacePreamble: {},
+}
+
+// positionLabel returns position as written by the caller, defaulting the
+// empty string to "end" (its meaning) so field-validation error messages
+// always name a position rather than an empty pair of quotes.
+func positionLabel(position string) string {
+	if position == "" {
+		return "end"
+	}
+	return position
 }
 

@@ -351,9 +351,8 @@ func (r *confluenceRenderer) renderHTMLBlock(w util.BufWriter, source []byte, no
 	return ast.WalkSkipChildren, nil
 }
 
-// Compiled regexps for preprocessConfluenceXML.
-// Note: code macro regexes (reCodeMacroWithLang, reCodeMacroNoLang) moved to
-// preprocess.go — they now run in Pass 0 before extractMacros.
+// Compiled regexps for preprocessConfluenceXML. Code macros are handled
+// separately, in Pass 0 (preprocess.go) before extractMacros runs.
 var (
 	// Any remaining ac:structured-macro (unknown macros): strip tags, keep inner text.
 	reUnknownMacro = regexp.MustCompile(`(?s)<ac:structured-macro[^>]*>.*?</ac:structured-macro>`)
@@ -370,9 +369,8 @@ var (
 // Note: code macros are handled in Pass 0 (preprocessNonMacroElements) before
 // this function runs, so they will never reach the unknown-macro branch here.
 func preprocessConfluenceXML(s string) string {
-	// 1. Unknown macros: strip tags, keep any visible text content.
+	// 1. Unknown macros.
 	s = reUnknownMacro.ReplaceAllStringFunc(s, func(match string) string {
-		// Strip all XML tags within the macro, leaving only text nodes.
 		inner := regexp.MustCompile(`<[^>]+>`).ReplaceAllString(match, "")
 		return strings.TrimSpace(inner)
 	})
@@ -505,11 +503,9 @@ func ToMarkdownWithMacrosResolved(storageFormat string, resolver Resolver) (stri
 	// Pass 4: Insert <!-- macro:mN --> comments.
 	if registry != nil {
 		result = insertMacroComments(result, registry)
-		// Pass 4a: Renumber IDs so they appear in document order. The pipeline
-		// assigns IDs in processing order (ADF panels first, then depth-first
-		// through nested macros), which leaves the rendered Markdown with
-		// non-monotonic IDs. Renumbering keeps the Markdown readable while
-		// preserving the registry/comment ID invariant.
+		// Pass 4a: Renumber IDs to document order — processing order (ADF
+		// panels first, then depth-first through macros) leaves them
+		// non-monotonic; this keeps the registry and inserted comments in sync.
 		result, registry = renumberMacroMarkers(result, registry)
 	}
 

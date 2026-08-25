@@ -188,22 +188,17 @@ func extractMacrosInto(xhtml string, log *ConversionLog, counter *int, resolver 
 	pos := 0
 
 	for {
-		// Find next top-level open tag.
 		openIdx := strings.Index(xhtml[pos:], macroOpenTag)
 		if openIdx < 0 {
-			// No more macros — append the rest and stop.
 			sb.WriteString(xhtml[pos:])
 			break
 		}
 		openStart := pos + openIdx
 
-		// Append everything before this macro.
 		sb.WriteString(xhtml[pos:openStart])
 
-		// Find the end of the opening tag (the ">").
 		tagEnd := strings.Index(xhtml[openStart:], ">")
 		if tagEnd < 0 {
-			// Malformed — append from here and stop.
 			sb.WriteString(xhtml[openStart:])
 			break
 		}
@@ -212,19 +207,15 @@ func extractMacrosInto(xhtml string, log *ConversionLog, counter *int, resolver 
 		openTag := xhtml[openStart:openTagEnd]
 		name := parseMacroName(openTag)
 
-		// Find the matching close tag using depth balancing.
 		closeEnd := findMatchingClose(xhtml, openTagEnd)
 		if closeEnd < 0 {
-			// Unbalanced — append from the open tag and stop.
 			sb.WriteString(xhtml[openStart:])
 			break
 		}
 
-		// Full macro XML: openStart..closeEnd.
 		fullXML := xhtml[openStart:closeEnd]
 
-		// Body: between opening tag's ">" and the start of the matching "</ac:structured-macro>".
-		// The matching close is at closeEnd - len(macroCloseTag).
+		// bodyXML spans the opening tag's ">" to the matching close tag's start.
 		closeStart := closeEnd - len(macroCloseTag)
 		bodyXML := xhtml[openTagEnd:closeStart]
 
@@ -232,7 +223,6 @@ func extractMacrosInto(xhtml string, log *ConversionLog, counter *int, resolver 
 			log.Macro(name)
 		}
 
-		// Recurse into the body to extract any nested macros.
 		processedBody, innerReg := extractMacrosInto(bodyXML, log, counter, resolver)
 		if innerReg != nil {
 			if registry == nil {
@@ -241,7 +231,6 @@ func extractMacrosInto(xhtml string, log *ConversionLog, counter *int, resolver 
 			registry.Entries = append(registry.Entries, innerReg.Entries...)
 		}
 
-		// Now register THIS macro.
 		*counter++
 		id := fmt.Sprintf("m%d", *counter)
 		cat := classifyMacro(name)
@@ -256,7 +245,6 @@ func extractMacrosInto(xhtml string, log *ConversionLog, counter *int, resolver 
 			OriginalXML: fullXML,
 		})
 
-		// Build the placeholder, using the body with inner placeholders substituted.
 		var placeholder string
 		switch cat {
 		case CategoryEditableFlat:
@@ -662,17 +650,14 @@ func segmentMarkdown(md string) []Segment {
 			continue
 		}
 
-		// Plain segment before this comment (if any).
 		if commentStart > pos {
 			plain := md[pos:commentStart]
 			segments = append(segments, Segment{Type: "plain", Content: plain})
 		}
 
-		// Extract macro ID from the comment.
 		sub := reMacroComment.FindStringSubmatch(md[commentStart:commentEnd])
 		macroID := sub[1]
 
-		// Find where the macro block ends.
 		blockEnd := findMacroBlockEnd(md, commentEnd, macroID)
 
 		macroContent := md[commentStart:blockEnd]
@@ -680,7 +665,6 @@ func segmentMarkdown(md string) []Segment {
 		pos = blockEnd
 	}
 
-	// Trailing plain segment (if any).
 	if pos < len(md) {
 		segments = append(segments, Segment{Type: "plain", Content: md[pos:]})
 	}
@@ -722,8 +706,7 @@ func findMacroBlockEnd(md string, commentEnd int, macroID string) int {
 		return len(md)
 	}
 
-	// Editable: the comment is alone on its line. Skip the newline(s) after the comment.
-	// Find the start of the actual content (skip blank lines after comment).
+	// Editable: comment is alone on its line — skip blank lines to find where content starts.
 	contentStart := commentEnd
 	for contentStart < len(md) && md[contentStart] == '\n' {
 		contentStart++
@@ -737,7 +720,6 @@ func findMacroBlockEnd(md string, commentEnd int, macroID string) int {
 		idx := strings.Index(md[contentStart:], "</details>")
 		if idx != -1 {
 			end := contentStart + idx + len("</details>")
-			// Consume trailing newlines.
 			for end < len(md) && md[end] == '\n' {
 				end++
 			}
@@ -764,7 +746,6 @@ func findMacroBlockEnd(md string, commentEnd int, macroID string) int {
 				break
 			}
 			lineEnd := end + nl + 1
-			// Peek at next line
 			nextLineStart := lineEnd
 			nextNL := strings.Index(md[nextLineStart:], "\n")
 			var nextLine string
@@ -774,12 +755,10 @@ func findMacroBlockEnd(md string, commentEnd int, macroID string) int {
 				nextLine = md[nextLineStart : nextLineStart+nextNL]
 			}
 			end = lineEnd
-			// Stop if next line is not blockquote and not blank
 			if len(nextLine) > 0 && nextLine[0] != '>' {
 				break
 			}
 			if len(nextLine) == 0 {
-				// Blank line — stop the blockquote block here
 				break
 			}
 		}
@@ -838,7 +817,6 @@ func consumeExpandBlock(md string, start int, macroID string) int {
 	endMarker := "<!-- /macro:" + macroID + " -->"
 	idx := strings.Index(md[start:], endMarker)
 	if idx != -1 {
-		// Consume up to and including the end marker and one trailing newline.
 		end := start + idx + len(endMarker)
 		if end < len(md) && md[end] == '\n' {
 			end++
@@ -861,7 +839,6 @@ func consumeExpandBlock(md string, start int, macroID string) int {
 			end = lineEnd
 			break
 		}
-		// Stop at the next open macro comment.
 		if strings.HasPrefix(md[nextLineStart:], "<!-- macro:") {
 			end = lineEnd
 			break
@@ -906,7 +883,6 @@ func restoreEditableFlat(entry *MacroEntry, content string) string {
 	for _, line := range strings.Split(content, "\n") {
 		if strings.HasPrefix(line, "> ") {
 			text := line[2:] // strip '> '
-			// Skip lines that are only the bold label (label-only lines).
 			if reBlockquoteLabel.MatchString(text) {
 				continue
 			}
@@ -915,7 +891,6 @@ func restoreEditableFlat(entry *MacroEntry, content string) string {
 			if reBlockquoteAlert.MatchString(text) {
 				continue
 			}
-			// Strip bold label from lines where it precedes body content.
 			if m := reBlockquoteLabelWithBody.FindStringSubmatch(text); m != nil {
 				text = m[1]
 			}
@@ -955,7 +930,6 @@ func restoreEditableStructured(entry *MacroEntry, content string) string {
 	}
 
 	// 2. Try new **▶ title** format.
-	// Find the title line.
 	titleMatch := reExpandTitle.FindStringSubmatchIndex(content)
 	if titleMatch != nil {
 		newTitle := content[titleMatch[2]:titleMatch[3]]
@@ -963,7 +937,6 @@ func restoreEditableStructured(entry *MacroEntry, content string) string {
 		afterTitle := content[titleMatch[1]:]
 		afterTitle = strings.TrimLeft(afterTitle, "\n")
 
-		// Look for the matching end marker <!-- /macro:mN --> to bound the body.
 		endMarker := "<!-- /macro:" + entry.ID + " -->"
 		var bodyMD string
 		if idx := strings.Index(afterTitle, endMarker); idx != -1 {
@@ -995,12 +968,10 @@ func stripExpandBorders(s string) string {
 func applyExpandEdits(entry *MacroEntry, newTitle, bodyMD string) string {
 	bodyMD = strings.TrimSpace(stripExpandBorders(bodyMD))
 	newBody := ToStorageFormat(bodyMD)
-	// Update title parameter.
 	xml := reTitleParam.ReplaceAllStringFunc(entry.OriginalXML, func(match string) string {
 		sub := reTitleParam.FindStringSubmatch(match)
 		return sub[1] + newTitle + sub[2]
 	})
-	// Update rich-text-body.
 	xml = rebuildMacroBody(xml, newBody)
 	return xml
 }
@@ -1055,7 +1026,6 @@ func insertMacroComments(md string, registry *MacroRegistry) string {
 		return "<!-- /macro:" + sub[1] + " -->"
 	})
 
-	// Replace each open sentinel token with a <!-- macro:mN --> comment.
 	md = reSentinelToken.ReplaceAllStringFunc(md, func(m string) string {
 		sub := reSentinelToken.FindStringSubmatch(m)
 		return "<!-- macro:" + sub[1] + " -->"
