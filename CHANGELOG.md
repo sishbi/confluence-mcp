@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.15](https://github.com/sishbi/confluence-mcp/compare/v0.0.14...v0.0.15) (2026-09-15)
+
+
+### Bug Fixes
+
+* emit postflight_steps in the Homebrew cask ([#42](https://github.com/sishbi/confluence-mcp/issues/42)) ([0023b47](https://github.com/sishbi/confluence-mcp/commit/0023b474d88dc19d2d4af9aa0e2204df2aee0757))
+
 ## [0.0.14](https://github.com/sishbi/confluence-mcp/compare/v0.0.13...v0.0.14) (2026-08-25)
 
 
