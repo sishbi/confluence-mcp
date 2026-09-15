@@ -33,11 +33,9 @@ cask "confluence-mcp" do
 
   binary "confluence-mcp"
 
-  postflight do
-    if OS.mac?
-      system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/confluence-mcp"]
-    end
-  end
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "confluence-mcp"], chdir: "."
+  end if OS.mac?
 
   # No zap stanza required
 end
